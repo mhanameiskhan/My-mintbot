@@ -141,12 +141,6 @@ const DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() !== 'false';
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS || 1000);
 const WALLET_REFRESH_MS = Number(process.env.WALLET_REFRESH_MS || 5000);
 const MINT_QUANTITY = Number(process.env.MINT_QUANTITY || 1);
-
-// Quantities the bot will try (highest first)
-const QUANTITY_TRIES = (process.env.QUANTITY_TRIES || '10,5,3,2,1')
-  .split(',')
-  .map(n => Number(n.trim()))
-  .filter(n => n > 0);
 const MAX_PRICE_ETH =
   process.env.MAX_PRICE_ETH === undefined || process.env.MAX_PRICE_ETH.trim() === ''
     ? null
@@ -510,84 +504,71 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
     return attemptDirectMint(contractAddress, sourceWallet);
   }
 
-  // Try highest quantity first, then lower if it fails
-let success = false;
-
-for (const qty of QUANTITY_TRIES) {
-  console.log(`[mint] Trying quantity ${qty} for ${slug}...`);
-
   let raw;
   try {
     raw = await buildDropMintTransaction(
       slug,
-      DRY_RUN ? (wallets[0]?.address || ethers.ZeroAddress) : wallets[0].address,
-      qty
+      DRY_RUN ? WALLET_ADDRESS || ethers.ZeroAddress : WALLET_ADDRESS,
+      MINT_QUANTITY
     );
   } catch (err) {
-    console.warn(`[opensea] quantity ${qty} failed to build: ${err.message}`);
-    continue;
+    console.warn(`[opensea] drops mint-build failed for "${slug}": ${err.message}. Falling back to direct mint.`);
+    return attemptDirectMint(contractAddress, sourceWallet);
   }
 
   const { to, data, value } = readMintTxFields(raw);
   if (!to || !data) {
-    console.warn(`[opensea] missing to/data for quantity ${qty}`);
-    continue;
+    console.warn(`[opensea] mint-build response missing to/data for "${slug}". Falling back to direct mint.`);
+    return attemptDirectMint(contractAddress, sourceWallet);
   }
 
   const valueWei = BigInt(value || '0');
-  const valueEth = Number(ethers.formatEther(valueWei));
+  const valueEth = ethers.formatEther(valueWei);
 
-  // Price check
-  if (MAX_PRICE_ETH !== null && valueEth > MAX_PRICE_ETH) {
-    console.warn(`[skip] ${slug} costs ${valueEth} ETH > MAX_PRICE_ETH=${MAX_PRICE_ETH}`);
-    await notify(`⏭ Skipped <code>${escapeHtml(slug)}</code> — costs ${valueEth} ETH (above your limit)`);
+  if (MAX_PRICE_ETH !== null && Number(valueEth) > MAX_PRICE_ETH) {
+    console.warn(`[skip] "${slug}" costs ${valueEth} ETH, above MAX_PRICE_ETH=${MAX_PRICE_ETH}. Skipping.`);
+    await notify(`⏭ Skipped <code>${escapeHtml(slug)}</code> — costs ${valueEth} ETH, above your MAX_PRICE_ETH cap.`);
     return;
   }
 
+  console.log(`[mint] collection=${slug} target=${to} value=${valueEth} ETH quantity=${MINT_QUANTITY}`);
+
   if (DRY_RUN) {
-    console.log(`[dry-run] Would mint ${qty} of ${slug} for ${valueEth} ETH`);
-    await notify(`🧪 <b>Dry run</b>: would mint <b>${qty}</b> of <code>${escapeHtml(slug)}</code> for ${valueEth} ETH`);
-    success = true;
-    break;
+    console.log('[dry-run] Would send this transaction now — nothing broadcast.');
+    await notify(`🧪 <b>Dry run</b>: would mint <code>${escapeHtml(slug)}</code> for ${valueEth} ETH (not broadcast).`);
+    return;
   }
 
-  // Real mint
   try {
     const provider = rpcPool.current();
-    const connectedSigner = wallets[0].signer.connect(provider);
-
-    const balance = await provider.getBalance(wallets[0].address);
-    const gasEstimate = await provider.estimateGas({ to, data, value: valueWei, from: wallets[0].address });
+    const connectedSigner = signer.connect(provider);
+    const balance = await provider.getBalance(WALLET_ADDRESS);
+    const gasEstimate = await provider.estimateGas({ to, data, value: valueWei, from: WALLET_ADDRESS });
     const feeData = await provider.getFeeData();
     const gasPrice = feeData.maxFeePerGas ?? feeData.gasPrice ?? 0n;
     const totalCost = valueWei + gasEstimate * gasPrice;
 
     if (balance < totalCost) {
-      console.error(`[mint] Not enough balance for quantity ${qty}`);
-      continue;
+      const msg = `Wallet balance ${ethers.formatEther(balance)} ETH is below estimated cost ~${ethers.formatEther(totalCost)} ETH.`;
+      console.error(`[mint] ${msg}`);
+      await notify(`❌ Couldn't mint <code>${escapeHtml(slug)}</code> — ${escapeHtml(msg)}`);
+      return;
     }
 
     const tx = await connectedSigner.sendTransaction({ to, data, value: valueWei });
-    console.log(`[mint] Sent qty ${qty} → tx ${tx.hash}`);
+    console.log(`[mint] sent tx ${tx.hash}, waiting for confirmation...`);
     const receipt = await tx.wait();
-
-    if (receipt.status === 1) {
-      await notify(`✅ <b>Minted ${qty}</b> of <code>${escapeHtml(slug)}</code>\nTx: <code>${escapeHtml(tx.hash)}</code>`);
-      success = true;
-      break; // Stop trying lower quantities
-    } else {
-      console.warn(`[mint] Quantity ${qty} reverted`);
-    }
+    const ok = receipt.status === 1;
+    console.log(ok ? `[mint] ✓ confirmed in block ${receipt.blockNumber}` : `[mint] ✗ reverted`);
+    await notify(
+      ok
+        ? `✅ <b>Minted</b> <code>${escapeHtml(slug)}</code>!\nBlock: ${receipt.blockNumber}\nTx: <code>${escapeHtml(tx.hash)}</code>`
+        : `⚠️ Mint reverted for <code>${escapeHtml(slug)}</code>\nTx: <code>${escapeHtml(tx.hash)}</code>`
+    );
   } catch (err) {
-    console.warn(`[mint] Quantity ${qty} failed: ${err.message}`);
-    continue;
+    console.error(`[mint] send failed: ${err.message}`);
+    await notify(`❌ Mint failed for <code>${escapeHtml(slug)}</code>: ${escapeHtml(err.message)}`);
   }
-}
-
-if (!success) {
-  console.error(`[mint] All quantity attempts failed for ${slug}`);
-  await notify(`❌ Could not mint <code>${escapeHtml(slug)}</code> (tried quantities: ${QUANTITY_TRIES.join(', ')})`);
-}
 }
 
 // ---------------------------------------------------------------------------
