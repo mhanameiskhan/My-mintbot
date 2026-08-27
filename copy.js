@@ -492,6 +492,38 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
     `🔔 <b>Mint detected</b>\nWallet: <code>${escapeHtml(sourceWallet)}</code>\nContract: <code>${escapeHtml(contractAddress)}</code>\nTx: <code>${escapeHtml(sourceTxHash)}</code>`
   );
 
+  // === NEW: Count how many NFTs the watched wallet minted in this transaction ===
+  let quantityToMint = 1; // default fallback
+
+  try {
+    const provider = rpcPool.current();
+    const receipt = await provider.getTransactionReceipt(sourceTxHash);
+
+    if (receipt && receipt.logs) {
+      let count = 0;
+      for (const log of receipt.logs) {
+        // Check if this is a Transfer event from 0x0 to the watched wallet
+        if (
+          log.topics.length >= 3 &&
+          log.topics[0] === ERC721_TRANSFER_TOPIC &&
+          log.topics[1] === ethers.zeroPadValue(NULL_ADDRESS, 32)
+        ) {
+          const toAddress = ethers.getAddress('0x' + log.topics[2].slice(26)).toLowerCase();
+          if (toAddress === sourceWallet.toLowerCase()) {
+            count++;
+          }
+        }
+      }
+      if (count > 0) {
+        quantityToMint = count;
+        console.log(`[mint] Detected quantity from source wallet: ${quantityToMint}`);
+      }
+    }
+  } catch (err) {
+    console.warn(`[mint] Could not count quantity from source tx, using 1. Error: ${err.message}`);
+  }
+
+  // === Continue with normal flow ===
   let slug;
   try {
     slug = await resolveCollectionSlug(contractAddress);
@@ -499,6 +531,7 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
     console.warn(`[opensea] contract lookup failed: ${err.message}. Falling back to direct mint.`);
     return attemptDirectMint(contractAddress, sourceWallet);
   }
+
   if (!slug) {
     console.warn(`[opensea] ${contractAddress} isn't attached to an OpenSea collection. Falling back to direct mint.`);
     return attemptDirectMint(contractAddress, sourceWallet);
@@ -509,7 +542,7 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
     raw = await buildDropMintTransaction(
       slug,
       DRY_RUN ? WALLET_ADDRESS || ethers.ZeroAddress : WALLET_ADDRESS,
-      MINT_QUANTITY
+      quantityToMint   // ← Now uses the detected quantity
     );
   } catch (err) {
     console.warn(`[opensea] drops mint-build failed for "${slug}": ${err.message}. Falling back to direct mint.`);
@@ -531,11 +564,13 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
     return;
   }
 
-  console.log(`[mint] collection=${slug} target=${to} value=${valueEth} ETH quantity=${MINT_QUANTITY}`);
+  console.log(`[mint] collection=${slug} target=${to} value=${valueEth} ETH quantity=${quantityToMint}`);
 
   if (DRY_RUN) {
     console.log('[dry-run] Would send this transaction now — nothing broadcast.');
-    await notify(`🧪 <b>Dry run</b>: would mint <code>${escapeHtml(slug)}</code> for ${valueEth} ETH (not broadcast).`);
+    await notify(
+      `🧪 <b>Dry run</b>: would mint <b>${quantityToMint}</b> of <code>${escapeHtml(slug)}</code> for ${valueEth} ETH (not broadcast).`
+    );
     return;
   }
 
@@ -559,10 +594,11 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
     console.log(`[mint] sent tx ${tx.hash}, waiting for confirmation...`);
     const receipt = await tx.wait();
     const ok = receipt.status === 1;
+
     console.log(ok ? `[mint] ✓ confirmed in block ${receipt.blockNumber}` : `[mint] ✗ reverted`);
     await notify(
       ok
-        ? `✅ <b>Minted</b> <code>${escapeHtml(slug)}</code>!\nBlock: ${receipt.blockNumber}\nTx: <code>${escapeHtml(tx.hash)}</code>`
+        ? `✅ <b>Minted ${quantityToMint}</b> of <code>${escapeHtml(slug)}</code>!\nBlock: ${receipt.blockNumber}\nTx: <code>${escapeHtml(tx.hash)}</code>`
         : `⚠️ Mint reverted for <code>${escapeHtml(slug)}</code>\nTx: <code>${escapeHtml(tx.hash)}</code>`
     );
   } catch (err) {
