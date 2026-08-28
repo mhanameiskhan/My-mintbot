@@ -1,9 +1,10 @@
 async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
-  console.log(`\n[mint detected] wallet=${sourceWallet} contract=${contractAddress} source_tx=${sourceTxHash}`);
+  console.log("===== COPY MINT FUNCTION CALLED =====");
+  console.log("Contract:", contractAddress);
+  console.log("Source Wallet:", sourceWallet);
+  console.log("Tx Hash:", sourceTxHash);
 
-  await notify(
-    `🔔 <b>Mint detected</b>\nWallet: <code>${escapeHtml(sourceWallet)}</code>\nContract: <code>${escapeHtml(contractAddress)}</code>\nTx: <code>${escapeHtml(sourceTxHash)}</code>`
-  );
+  await notify(`🔔 Test: copyMint function was called for ${sourceWallet}`);
 
   // ========== 1. Detect how many the watched wallet minted ==========
   let detectedQty = 1;
