@@ -1,12 +1,11 @@
 async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
-  console.log("===== COPY MINT FUNCTION CALLED =====");
-  console.log("Contract:", contractAddress);
-  console.log("Source Wallet:", sourceWallet);
-  console.log("Tx Hash:", sourceTxHash);
+  console.log(`\n[mint detected] wallet=${sourceWallet} contract=${contractAddress} source_tx=${sourceTxHash}`);
 
-  await notify(`🔔 Test: copyMint function was called for ${sourceWallet}`);
+  await notify(
+    `🔔 <b>Mint detected</b>\nWallet: <code>${escapeHtml(sourceWallet)}</code>\nContract: <code>${escapeHtml(contractAddress)}</code>\nTx: <code>${escapeHtml(sourceTxHash)}</code>`
+  );
 
-  // ========== 1. Detect how many the watched wallet minted ==========
+  // ===== Detect how many the watched wallet minted =====
   let detectedQty = 1;
 
   try {
@@ -27,51 +26,36 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
           }
         }
       }
-      if (count > 0) detectedQty = count;
+      if (count > 0) {
+        detectedQty = count;
+      }
     }
   } catch (err) {
-    console.warn(`[mint] Could not detect quantity, defaulting to 1 → ${err.message}`);
+    console.warn(`[mint] Could not detect quantity, using 1 → ${err.message}`);
   }
 
-  console.log(`[mint] Detected quantity from source wallet: ${detectedQty}`);
+  console.log(`[mint] Detected quantity: ${detectedQty}`);
 
-  // ========== 2. Build list of quantities to try (highest first) ==========
-  // You can change this list in .env with QUANTITY_TRIES=10,5,3,2,1
-  const defaultTries = [10, 5, 3, 2, 1];
-  let quantityTries = (process.env.QUANTITY_TRIES || defaultTries.join(','))
-    .split(',')
-    .map(n => Number(n.trim()))
-    .filter(n => n > 0);
+  // Quantities to try: detected quantity first, then 1
+  const quantitiesToTry = detectedQty > 1 ? [detectedQty, 1] : [1];
 
-  // Make sure the detected quantity is also tried
-  if (!quantityTries.includes(detectedQty)) {
-    quantityTries.push(detectedQty);
-  }
-
-  // Sort highest to lowest and remove duplicates
-  quantityTries = [...new Set(quantityTries)].sort((a, b) => b - a);
-
-  console.log(`[mint] Will try quantities: ${quantityTries.join(', ')}`);
-
-  // ========== 3. Resolve OpenSea collection ==========
+  // ===== Resolve OpenSea collection =====
   let slug;
   try {
     slug = await resolveCollectionSlug(contractAddress);
   } catch (err) {
-    console.warn(`[opensea] contract lookup failed: ${err.message}. Falling back to direct mint.`);
+    console.warn(`[opensea] lookup failed: ${err.message}`);
     return attemptDirectMint(contractAddress, sourceWallet);
   }
 
   if (!slug) {
-    console.warn(`[opensea] No OpenSea collection found. Falling back to direct mint.`);
+    console.warn(`[opensea] No drop found`);
     return attemptDirectMint(contractAddress, sourceWallet);
   }
 
-  // ========== 4. Try quantities from highest to lowest ==========
-  let success = false;
-
-  for (const qty of quantityTries) {
-    console.log(`[mint] Trying quantity ${qty} for ${slug}...`);
+  // ===== Try quantities =====
+  for (const qty of quantitiesToTry) {
+    console.log(`[mint] Trying quantity ${qty}...`);
 
     let raw;
     try {
@@ -81,36 +65,34 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
         qty
       );
     } catch (err) {
-      console.warn(`[opensea] quantity ${qty} failed to build: ${err.message}`);
+      console.warn(`[opensea] Failed to build tx for qty ${qty}: ${err.message}`);
       continue;
     }
 
     const { to, data, value } = readMintTxFields(raw);
     if (!to || !data) {
-      console.warn(`[opensea] missing to/data for quantity ${qty}`);
+      console.warn(`[opensea] Invalid tx data for qty ${qty}`);
       continue;
     }
 
     const valueWei = BigInt(value || '0');
     const valueEth = Number(ethers.formatEther(valueWei));
 
-    // Price protection
     if (MAX_PRICE_ETH !== null && valueEth > MAX_PRICE_ETH) {
-      console.warn(`[skip] ${slug} qty ${qty} costs ${valueEth} ETH > MAX_PRICE_ETH`);
-      continue;
+      console.warn(`[skip] Price too high: ${valueEth} ETH`);
+      await notify(`⏭ Skipped <code>${escapeHtml(slug)}</code> — ${valueEth} ETH is above your limit`);
+      return;
     }
 
-    // Dry run mode
+    // Dry Run
     if (DRY_RUN) {
-      console.log(`[dry-run] Would mint ${qty} of ${slug} for ${valueEth} ETH`);
       await notify(
         `🧪 <b>Dry run</b>: would mint <b>${qty}</b> of <code>${escapeHtml(slug)}</code> for ${valueEth} ETH`
       );
-      success = true;
-      break;
+      return;
     }
 
-    // Real mint attempt
+    // Real mint
     try {
       const provider = rpcPool.current();
       const connectedSigner = signer.connect(provider);
@@ -124,36 +106,36 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
       });
       const feeData = await provider.getFeeData();
       const gasPrice = feeData.maxFeePerGas ?? feeData.gasPrice ?? 0n;
-      const totalCost = valueWei + gasEstimate * gasPrice;
+      const totalCost = valueWei + (gasEstimate * gasPrice);
 
       if (balance < totalCost) {
-        console.warn(`[mint] Not enough balance for qty ${qty}`);
+        console.warn(`[mint] Insufficient balance for qty ${qty}`);
         continue;
       }
 
-      const tx = await connectedSigner.sendTransaction({ to, data, value: valueWei });
-      console.log(`[mint] Sent qty ${qty} → ${tx.hash}`);
+      const tx = await connectedSigner.sendTransaction({
+        to,
+        data,
+        value: valueWei,
+      });
+
+      console.log(`[mint] Transaction sent: ${tx.hash}`);
       const receipt = await tx.wait();
 
       if (receipt.status === 1) {
         await notify(
-          `✅ <b>Minted ${qty}</b> of <code>${escapeHtml(slug)}</code>\nTx: <code>${escapeHtml(tx.hash)}</code>`
+          `✅ <b>Successfully minted ${qty}</b> of <code>${escapeHtml(slug)}</code>\nTx: <code>${escapeHtml(tx.hash)}</code>`
         );
-        success = true;
-        break; // Stop after first successful mint
+        return; // Stop after success
       } else {
-        console.warn(`[mint] Quantity ${qty} reverted`);
+        console.warn(`[mint] Transaction reverted for qty ${qty}`);
       }
     } catch (err) {
-      console.warn(`[mint] Quantity ${qty} failed: ${err.message}`);
+      console.warn(`[mint] Failed qty ${qty}: ${err.message}`);
       continue;
     }
   }
 
-  if (!success) {
-    console.error(`[mint] All quantity attempts failed for ${slug}`);
-    await notify(
-      `❌ Could not mint <code>${escapeHtml(slug)}</code><br>Tried quantities: ${quantityTries.join(', ')}`
-    );
-  }
+  // If we reach here, all attempts failed
+  await notify(`❌ Failed to mint <code>${escapeHtml(slug)}</code> (tried: ${quantitiesToTry.join(', ')})`);
 }
