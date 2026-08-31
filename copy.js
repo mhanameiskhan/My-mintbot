@@ -5,8 +5,9 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
     `🔔 <b>Mint detected</b>\nWallet: <code>${escapeHtml(sourceWallet)}</code>\nContract: <code>${escapeHtml(contractAddress)}</code>\nTx: <code>${escapeHtml(sourceTxHash)}</code>`
   );
 
-  // Detect how many NFTs the watched wallet received
+  // ===== Detect how many the watched wallet minted =====
   let detectedQty = 1;
+
   try {
     const provider = rpcPool.current();
     const receipt = await provider.getTransactionReceipt(sourceTxHash);
@@ -19,35 +20,26 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
           log.topics[0] === ERC721_TRANSFER_TOPIC &&
           log.topics[1] === ethers.zeroPadValue(NULL_ADDRESS, 32)
         ) {
-          const toAddress = ('0x' + log.topics[2].slice(26)).toLowerCase();
+          const toAddress = ethers.getAddress('0x' + log.topics[2].slice(26)).toLowerCase();
           if (toAddress === sourceWallet.toLowerCase()) {
             count++;
           }
         }
       }
-      if (count > 0) detectedQty = count;
+      if (count > 0) {
+        detectedQty = count;
+      }
     }
   } catch (err) {
-    console.warn(`[mint] Could not detect quantity: ${err.message}`);
+    console.warn(`[mint] Could not detect quantity, using 1 → ${err.message}`);
   }
 
-  // Quantities to try (highest first)
-  let quantityTries = (process.env.QUANTITY_TRIES || '10,5,3,2,1')
-    .split(',')
-    .map(n => Number(n.trim()))
-    .filter(n => n > 0);
+  console.log(`[mint] Detected quantity: ${detectedQty}`);
 
-  // Make sure detected quantity is also tried
-  if (!quantityTries.includes(detectedQty)) {
-    quantityTries.push(detectedQty);
-  }
+  // Quantities to try: detected quantity first, then 1
+  const quantitiesToTry = detectedQty > 1 ? [detectedQty, 1] : [1];
 
-  // Remove duplicates and sort highest → lowest
-  quantityTries = [...new Set(quantityTries)].sort((a, b) => b - a);
-
-  await notify(`📊 Detected quantity: <b>${detectedQty}</b>\nWill try: <b>${quantityTries.join(', ')}</b>`);
-
-  // Find OpenSea collection
+  // ===== Resolve OpenSea collection =====
   let slug;
   try {
     slug = await resolveCollectionSlug(contractAddress);
@@ -57,15 +49,13 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
   }
 
   if (!slug) {
-    console.warn(`[opensea] No OpenSea Drop found`);
+    console.warn(`[opensea] No drop found`);
     return attemptDirectMint(contractAddress, sourceWallet);
   }
 
-  await notify(`📦 Collection: <code>${escapeHtml(slug)}</code>`);
-
-  // Try each quantity from highest to lowest
-  for (const qty of quantityTries) {
-    await notify(`⏳ Trying quantity <b>${qty}</b>...`);
+  // ===== Try quantities =====
+  for (const qty of quantitiesToTry) {
+    console.log(`[mint] Trying quantity ${qty}...`);
 
     let raw;
     try {
@@ -75,32 +65,34 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
         qty
       );
     } catch (err) {
-      await notify(`❌ Could not build transaction for qty ${qty}`);
+      console.warn(`[opensea] Failed to build tx for qty ${qty}: ${err.message}`);
       continue;
     }
 
     const { to, data, value } = readMintTxFields(raw);
     if (!to || !data) {
-      await notify(`❌ Invalid data for qty ${qty}`);
+      console.warn(`[opensea] Invalid tx data for qty ${qty}`);
       continue;
     }
 
     const valueWei = BigInt(value || '0');
     const valueEth = Number(ethers.formatEther(valueWei));
 
-    await notify(`💰 Price for ${qty}: <b>${valueEth} ETH</b>`);
-
     if (MAX_PRICE_ETH !== null && valueEth > MAX_PRICE_ETH) {
-      await notify(`⏭ Qty ${qty} is above your MAX_PRICE_ETH limit`);
-      continue;
-    }
-
-    if (DRY_RUN) {
-      await notify(`🧪 <b>Dry run</b>: would mint <b>${qty}</b> for ${valueEth} ETH`);
+      console.warn(`[skip] Price too high: ${valueEth} ETH`);
+      await notify(`⏭ Skipped <code>${escapeHtml(slug)}</code> — ${valueEth} ETH is above your limit`);
       return;
     }
 
-    // Real mint attempt
+    // Dry Run
+    if (DRY_RUN) {
+      await notify(
+        `🧪 <b>Dry run</b>: would mint <b>${qty}</b> of <code>${escapeHtml(slug)}</code> for ${valueEth} ETH`
+      );
+      return;
+    }
+
+    // Real mint
     try {
       const provider = rpcPool.current();
       const connectedSigner = signer.connect(provider);
@@ -110,40 +102,40 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
         to,
         data,
         value: valueWei,
-        from: WALLET_ADDRESS
+        from: WALLET_ADDRESS,
       });
       const feeData = await provider.getFeeData();
       const gasPrice = feeData.maxFeePerGas ?? feeData.gasPrice ?? 0n;
-      const totalCost = valueWei + gasEstimate * gasPrice;
+      const totalCost = valueWei + (gasEstimate * gasPrice);
 
       if (balance < totalCost) {
-        await notify(`❌ Not enough balance for qty ${qty}`);
+        console.warn(`[mint] Insufficient balance for qty ${qty}`);
         continue;
       }
 
       const tx = await connectedSigner.sendTransaction({
         to,
         data,
-        value: valueWei
+        value: valueWei,
       });
 
-      await notify(`🚀 Transaction sent for qty ${qty}\n<code>${escapeHtml(tx.hash)}</code>`);
-
+      console.log(`[mint] Transaction sent: ${tx.hash}`);
       const receipt = await tx.wait();
 
       if (receipt.status === 1) {
         await notify(
-          `✅ <b>SUCCESS</b>\nMinted <b>${qty}</b> of <code>${escapeHtml(slug)}</code>\nTx: <code>${escapeHtml(tx.hash)}</code>`
+          `✅ <b>Successfully minted ${qty}</b> of <code>${escapeHtml(slug)}</code>\nTx: <code>${escapeHtml(tx.hash)}</code>`
         );
-        return; // Stop after first success
+        return; // Stop after success
       } else {
-        await notify(`⚠️ Transaction reverted for qty ${qty}`);
+        console.warn(`[mint] Transaction reverted for qty ${qty}`);
       }
     } catch (err) {
-      await notify(`❌ Qty ${qty} failed: ${escapeHtml(err.message)}`);
+      console.warn(`[mint] Failed qty ${qty}: ${err.message}`);
       continue;
     }
   }
 
-  await notify(`❌ All quantity attempts failed`);
+  // If we reach here, all attempts failed
+  await notify(`❌ Failed to mint <code>${escapeHtml(slug)}</code> (tried: ${quantitiesToTry.join(', ')})`);
 }
