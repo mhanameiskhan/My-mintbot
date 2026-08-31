@@ -1,3 +1,5 @@
+console.log("===== BOT FILE IS STARTING =====");
+
 async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
   console.log(`\n[mint detected] wallet=${sourceWallet} contract=${contractAddress} source_tx=${sourceTxHash}`);
 
