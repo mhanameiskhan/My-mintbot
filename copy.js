@@ -669,18 +669,29 @@ async function pollLoop() {
     lastCheckedBlock = await getLatestBlock();
     console.log(`[init] starting from block ${lastCheckedBlock}`);
   }
+
   try {
     const latest = await getLatestBlock();
+
     if (latest > lastCheckedBlock) {
-      const mints = await findMintsInRange(lastCheckedBlock + 1, latest);
+      // Only check a limited number of blocks at a time (important fix)
+      const MAX_BLOCKS_PER_SCAN = 1000;
+      const toBlock = Math.min(lastCheckedBlock + MAX_BLOCKS_PER_SCAN, latest);
+
+      console.log(`[poll] scanning blocks ${lastCheckedBlock + 1} → ${toBlock}`);
+
+      const mints = await findMintsInRange(lastCheckedBlock + 1, toBlock);
+
       for (const mint of mints) {
         await copyMint(mint.contractAddress, mint.txHash, mint.wallet);
       }
-      lastCheckedBlock = latest;
+
+      lastCheckedBlock = toBlock;
     }
   } catch (err) {
     console.error(`[poll] ${err.message}`);
   }
+
   setTimeout(pollLoop, POLL_INTERVAL_MS);
 }
 
