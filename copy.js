@@ -529,17 +529,12 @@ async function attemptDirectMint(contractAddress, sourceWallet) {
 async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
   console.log(`\n[mint detected] wallet=${sourceWallet} contract=${contractAddress} source_tx=${sourceTxHash}`);
 
-  await notify(
-    `🔔 <b>Mint detected</b>\nFrom: <code>${escapeHtml(sourceWallet)}</code>\nContract: <code>${escapeHtml(contractAddress)}</code>\nTx: <code>${escapeHtml(sourceTxHash)}</code>`
-  );
-
-  // Detect how many NFTs the watched wallet received
+  // Detect quantity
   let detectedQty = 1;
   try {
     const provider = rpcPool.current();
     const receipt = await provider.getTransactionReceipt(sourceTxHash);
-
-    if (receipt && receipt.logs) {
+    if (receipt?.logs) {
       let count = 0;
       for (const log of receipt.logs) {
         if (
@@ -548,95 +543,102 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
           log.topics[1] === ethers.zeroPadValue(NULL_ADDRESS, 32)
         ) {
           const toAddress = ('0x' + log.topics[2].slice(26)).toLowerCase();
-          if (toAddress === sourceWallet.toLowerCase()) {
-            count++;
-          }
+          if (toAddress === sourceWallet.toLowerCase()) count++;
         }
       }
       if (count > 0) detectedQty = count;
     }
   } catch (err) {
-    console.warn(`[mint] Could not detect quantity: ${err.message}`);
+    console.warn(`[mint] quantity detect failed: ${err.message}`);
   }
 
-  // Quantities to try (highest first)
+  // Quantity list
   let quantityTries = (process.env.QUANTITY_TRIES || '10,5,3,2,1')
     .split(',')
     .map(n => Number(n.trim()))
     .filter(n => n > 0);
 
-  if (!quantityTries.includes(detectedQty)) {
-    quantityTries.push(detectedQty);
-  }
-
+  if (!quantityTries.includes(detectedQty)) quantityTries.push(detectedQty);
   quantityTries = [...new Set(quantityTries)].sort((a, b) => b - a);
 
-  await notify(`📊 Detected quantity: <b>${detectedQty}</b>\nWill try quantities: <b>${quantityTries.join(', ')}</b>`);
-
-  // Resolve OpenSea collection
-  let slug;
+  // Resolve collection
+  let slug = null;
   try {
     slug = await resolveCollectionSlug(contractAddress);
   } catch (err) {
-    console.warn(`[opensea] lookup failed: ${err.message}`);
+    await notify(
+      `🔔 <b>Mint detected</b>\n` +
+      `From: <code>${escapeHtml(sourceWallet)}</code>\n` +
+      `Contract: <code>${escapeHtml(contractAddress)}</code>\n` +
+      `⚠️ OpenSea lookup failed → trying direct mint`
+    );
     return attemptDirectMint(contractAddress, sourceWallet);
   }
 
   if (!slug) {
-    console.warn(`[opensea] No OpenSea Drop found`);
+    await notify(
+      `🔔 <b>Mint detected</b>\n` +
+      `From: <code>${escapeHtml(sourceWallet)}</code>\n` +
+      `Contract: <code>${escapeHtml(contractAddress)}</code>\n` +
+      `⚠️ No OpenSea Drop found → trying direct mint`
+    );
     return attemptDirectMint(contractAddress, sourceWallet);
   }
 
-  await notify(`📦 Collection: <code>${escapeHtml(slug)}</code>`);
+  // Initial summary message
+  await notify(
+    `🔔 <b>Mint detected</b>\n` +
+    `From: <code>${escapeHtml(sourceWallet)}</code>\n` +
+    `Collection: <code>${escapeHtml(slug)}</code>\n` +
+    `Detected qty: <b>${detectedQty}</b>\n` +
+    `Trying quantities: <b>${quantityTries.join(', ')}</b>\n` +
+    `Wallets: <b>${wallets.length || 1}</b>`
+  );
 
-  // Decide which wallets to use
   const mintWallets = DRY_RUN
     ? [{ address: (wallets[0]?.address || WALLET_ADDRESS || ethers.ZeroAddress) }]
     : wallets;
 
   if (mintWallets.length === 0) {
-    await notify(`❌ No minting wallets available`);
+    await notify(`❌ No minting wallets configured`);
     return;
   }
 
-  let anySuccess = false;
+  let successCount = 0;
+  const results = [];
 
-  // Try EVERY wallet (does not stop after first success)
   for (const wallet of mintWallets) {
     let walletSuccess = false;
+    let lastError = '';
 
     for (const qty of quantityTries) {
-      await notify(`⏳ Trying <b>${qty}</b> with wallet <code>${escapeHtml(wallet.address.slice(0, 10))}...</code>`);
-
       let raw;
       try {
         raw = await buildDropMintTransaction(slug, wallet.address, qty);
       } catch (err) {
-        await notify(`❌ Failed to build tx for qty ${qty}`);
+        lastError = err.message || 'OpenSea build failed';
         continue;
       }
 
       const { to, data, value } = readMintTxFields(raw);
       if (!to || !data) {
-        await notify(`❌ Invalid tx data for qty ${qty}`);
+        lastError = 'Invalid transaction data from OpenSea';
         continue;
       }
 
       const valueWei = BigInt(value || '0');
       const valueEth = Number(ethers.formatEther(valueWei));
 
-      await notify(`💰 Price for ${qty}: <b>${valueEth} ETH</b>`);
-
       if (MAX_PRICE_ETH !== null && valueEth > MAX_PRICE_ETH) {
-        await notify(`⏭ Qty ${qty} is above your MAX_PRICE_ETH limit`);
+        lastError = `Price ${valueEth} ETH above limit`;
         continue;
       }
 
       if (DRY_RUN) {
-        await notify(`🧪 <b>Dry run</b>: would mint <b>${qty}</b> with <code>${escapeHtml(wallet.address.slice(0, 10))}...</code>`);
+        results.push(`🧪 Dry run: would mint ${qty} with ${wallet.address.slice(0, 10)}... (${valueEth} ETH)`);
         walletSuccess = true;
-        anySuccess = true;
-        break; // Move to next wallet in dry run
+        successCount++;
+        break;
       }
 
       // Real mint
@@ -646,56 +648,53 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
 
         const balance = await provider.getBalance(wallet.address);
         const gasEstimate = await provider.estimateGas({
-          to,
-          data,
-          value: valueWei,
-          from: wallet.address
+          to, data, value: valueWei, from: wallet.address
         });
         const feeData = await provider.getFeeData();
         const gasPrice = feeData.maxFeePerGas ?? feeData.gasPrice ?? 0n;
         const totalCost = valueWei + gasEstimate * gasPrice;
 
         if (balance < totalCost) {
-          await notify(`❌ Wallet <code>${escapeHtml(wallet.address.slice(0, 10))}...</code> has not enough balance for qty ${qty}`);
+          lastError = `Insufficient balance (need ~${ethers.formatEther(totalCost)} ETH)`;
           continue;
         }
 
-        const tx = await connectedSigner.sendTransaction({
-          to,
-          data,
-          value: valueWei
-        });
-
-        await notify(`🚀 Transaction sent\nQty: <b>${qty}</b>\nWallet: <code>${escapeHtml(wallet.address.slice(0, 10))}...</code>\nTx: <code>${escapeHtml(tx.hash)}</code>`);
-
+        const tx = await connectedSigner.sendTransaction({ to, data, value: valueWei });
         const receipt = await tx.wait();
 
         if (receipt.status === 1) {
-          await notify(
-            `✅ <b>SUCCESS</b>\nMinted <b>${qty}</b> of <code>${escapeHtml(slug)}</code>\nWallet: <code>${escapeHtml(wallet.address)}</code>\nTx: <code>${escapeHtml(tx.hash)}</code>`
-          );
+          results.push(`✅ ${wallet.address.slice(0, 10)}... minted ${qty} | Tx: ${tx.hash.slice(0, 12)}...`);
           walletSuccess = true;
-          anySuccess = true;
-          break; // This wallet succeeded, move to the next wallet
+          successCount++;
+          break;
         } else {
-          await notify(`⚠️ Transaction reverted for qty ${qty}`);
+          lastError = `Transaction reverted`;
         }
       } catch (err) {
-        await notify(`❌ Qty ${qty} failed: ${escapeHtml(err.message)}`);
+        lastError = err.message || 'Send failed';
         continue;
       }
     }
 
     if (!walletSuccess) {
-      await notify(`❌ Wallet <code>${escapeHtml(wallet.address.slice(0, 10))}...</code> failed all quantities`);
+      results.push(`❌ ${wallet.address.slice(0, 10)}... failed → ${lastError.slice(0, 80)}`);
     }
   }
 
-  if (!anySuccess) {
-    await notify(`❌ All wallets failed to mint <code>${escapeHtml(slug)}</code>`);
-  } else {
-    await notify(`✅ Finished trying all wallets for <code>${escapeHtml(slug)}</code>`);
+  // Final summary message
+  let summary =
+    `📋 <b>Result for</b> <code>${escapeHtml(slug)}</code>\n` +
+    `Success: <b>${successCount}/${mintWallets.length}</b> wallets\n\n`;
+
+  summary += results.join('\n');
+
+  if (successCount === 0) {
+    summary += `\n\n⚠️ All OpenSea attempts failed. Trying direct mint fallback...`;
+    await notify(summary);
+    return attemptDirectMint(contractAddress, sourceWallet);
   }
+
+  await notify(summary);
 }
 
 // ---------------------------------------------------------------------------
