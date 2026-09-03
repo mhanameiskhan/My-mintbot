@@ -599,8 +599,12 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
     return;
   }
 
-  // Try every wallet × every quantity
+  let anySuccess = false;
+
+  // Try EVERY wallet (does not stop after first success)
   for (const wallet of mintWallets) {
+    let walletSuccess = false;
+
     for (const qty of quantityTries) {
       await notify(`⏳ Trying <b>${qty}</b> with wallet <code>${escapeHtml(wallet.address.slice(0, 10))}...</code>`);
 
@@ -629,8 +633,10 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
       }
 
       if (DRY_RUN) {
-        await notify(`🧪 <b>Dry run</b>: would mint <b>${qty}</b> for ${valueEth} ETH with <code>${escapeHtml(wallet.address.slice(0, 10))}...</code>`);
-        return;
+        await notify(`🧪 <b>Dry run</b>: would mint <b>${qty}</b> with <code>${escapeHtml(wallet.address.slice(0, 10))}...</code>`);
+        walletSuccess = true;
+        anySuccess = true;
+        break; // Move to next wallet in dry run
       }
 
       // Real mint
@@ -660,7 +666,7 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
           value: valueWei
         });
 
-        await notify(`🚀 Transaction sent\nQty: <b>${qty}</b>\nTx: <code>${escapeHtml(tx.hash)}</code>`);
+        await notify(`🚀 Transaction sent\nQty: <b>${qty}</b>\nWallet: <code>${escapeHtml(wallet.address.slice(0, 10))}...</code>\nTx: <code>${escapeHtml(tx.hash)}</code>`);
 
         const receipt = await tx.wait();
 
@@ -668,7 +674,9 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
           await notify(
             `✅ <b>SUCCESS</b>\nMinted <b>${qty}</b> of <code>${escapeHtml(slug)}</code>\nWallet: <code>${escapeHtml(wallet.address)}</code>\nTx: <code>${escapeHtml(tx.hash)}</code>`
           );
-          return; // Stop after first success
+          walletSuccess = true;
+          anySuccess = true;
+          break; // This wallet succeeded, move to the next wallet
         } else {
           await notify(`⚠️ Transaction reverted for qty ${qty}`);
         }
@@ -677,9 +685,17 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
         continue;
       }
     }
+
+    if (!walletSuccess) {
+      await notify(`❌ Wallet <code>${escapeHtml(wallet.address.slice(0, 10))}...</code> failed all quantities`);
+    }
   }
 
-  await notify(`❌ All wallets and quantities failed for <code>${escapeHtml(slug)}</code>`);
+  if (!anySuccess) {
+    await notify(`❌ All wallets failed to mint <code>${escapeHtml(slug)}</code>`);
+  } else {
+    await notify(`✅ Finished trying all wallets for <code>${escapeHtml(slug)}</code>`);
+  }
 }
 
 // ---------------------------------------------------------------------------
