@@ -267,13 +267,31 @@ bot.start(async (ctx) => {
 
 bot.hears('📊 Status', async (ctx) => {
   if (!isAuthorizedChat(ctx)) return;
-  await ctx.reply(
-    `Chain: ${CHAIN_ID}\n` +
-    `Watched wallets: ${watchedWallets.length}\n` +
-    `Poll interval: ${POLL_INTERVAL_MS}ms\n` +
-    `DRY_RUN: ${DRY_RUN}\n` +
-    `Minting wallets: ${wallets?.length || 1}`
-  );
+
+  const mintingWalletsCount = wallets?.length || (WALLET_ADDRESS ? 1 : 0);
+  const pauseText = isPaused ? '⏸ Paused' : '▶️ Running';
+  const dryRunText = DRY_RUN ? '🧪 Dry Run (ON)' : '🔥 Live Minting (OFF)';
+
+  let mintingList = 'None';
+  if (wallets && wallets.length > 0) {
+    mintingList = wallets.map((w, i) => `${i + 1}. <code>${escapeHtml(w.address.slice(0, 12))}...</code>`).join('\n');
+  } else if (WALLET_ADDRESS) {
+    mintingList = `<code>${escapeHtml(WALLET_ADDRESS.slice(0, 12))}...</code>`;
+  }
+
+  const message =
+    `📊 <b>Bot Status</b>\n\n` +
+    `State: <b>${pauseText}</b>\n` +
+    `Mode: <b>${dryRunText}</b>\n` +
+    `Chain: <b>${CHAIN_ID}</b>\n` +
+    `Poll interval: <b>${POLL_INTERVAL_MS}ms</b>\n\n` +
+    `👀 Watched wallets: <b>${watchedWallets.length}</b>\n` +
+    `💼 Minting wallets: <b>${mintingWalletsCount}</b>\n` +
+    `${mintingList}\n\n` +
+    `💰 Max price: <b>${MAX_PRICE_ETH ?? 'not set'} ETH</b>\n` +
+    `🔢 Quantities: <b>${process.env.QUANTITY_TRIES || '10,5,3,2,1'}</b>`;
+
+  await ctx.reply(message, { parse_mode: 'HTML' });
 });
 
 bot.hears('👛 Wallets', async (ctx) => {
@@ -397,17 +415,34 @@ bot.command('wallets', async (ctx) => {
   ctx.reply(`Watching ${watchedWallets.length} wallet(s):\n${list}`, { parse_mode: 'HTML' });
 });
 
-bot.command('status', (ctx) => {
+bot.command('status', async (ctx) => {
   if (!isAuthorizedChat(ctx)) return;
-  ctx.reply(
-    `Chain: ${CHAIN_ID}\n` +
-      `Watched wallets: ${watchedWallets.length}\n` +
-      `Poll interval: ${POLL_INTERVAL_MS}ms\n` +
-      `DRY_RUN: ${DRY_RUN}\n` +
-      `Minting wallet: ${DRY_RUN ? 'n/a (dry run)' : WALLET_ADDRESS}`
-  );
-});
 
+  const mintingWalletsCount = wallets?.length || (WALLET_ADDRESS ? 1 : 0);
+  const pauseText = isPaused ? '⏸ Paused' : '▶️ Running';
+  const dryRunText = DRY_RUN ? '🧪 Dry Run (ON)' : '🔥 Live Minting (OFF)';
+
+  let mintingList = 'None';
+  if (wallets && wallets.length > 0) {
+    mintingList = wallets.map((w, i) => `${i + 1}. <code>${escapeHtml(w.address.slice(0, 12))}...</code>`).join('\n');
+  } else if (WALLET_ADDRESS) {
+    mintingList = `<code>${escapeHtml(WALLET_ADDRESS.slice(0, 12))}...</code>`;
+  }
+
+  const message =
+    `📊 <b>Bot Status</b>\n\n` +
+    `State: <b>${pauseText}</b>\n` +
+    `Mode: <b>${dryRunText}</b>\n` +
+    `Chain: <b>${CHAIN_ID}</b>\n` +
+    `Poll interval: <b>${POLL_INTERVAL_MS}ms</b>\n\n` +
+    `👀 Watched wallets: <b>${watchedWallets.length}</b>\n` +
+    `💼 Minting wallets: <b>${mintingWalletsCount}</b>\n` +
+    `${mintingList}\n\n` +
+    `💰 Max price: <b>${MAX_PRICE_ETH ?? 'not set'} ETH</b>\n` +
+    `🔢 Quantities: <b>${process.env.QUANTITY_TRIES || '10,5,3,2,1'}</b>`;
+
+  await ctx.reply(message, { parse_mode: 'HTML' });
+});
 // ---------------------------------------------------------------------------
 // Multi-RPC pool with failover
 // ---------------------------------------------------------------------------
@@ -686,7 +721,7 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
     await notify(`⏸ Mint detected but bot is paused. Skipping.`);
     return;
   }
-  
+
   console.log(`\n[mint detected] wallet=${sourceWallet} contract=${contractAddress} source_tx=${sourceTxHash}`);
 
   // Detect quantity
