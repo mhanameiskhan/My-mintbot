@@ -249,9 +249,6 @@ async function notify(text) {
   }
 }
 
-// ---------- Button Menu ----------
-import { Markup } from 'telegraf';  // if this fails, we'll use another way below
-
 // ===== BUTTON MENU =====
 const mainMenu = Markup.keyboard([
   ['📊 Status', '👛 Wallets'],
