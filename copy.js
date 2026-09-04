@@ -463,63 +463,129 @@ function abiHasFunction(abi, name) {
 }
 
 async function attemptDirectMint(contractAddress, sourceWallet) {
+  await notify(
+    `⚙️ <b>Direct mint fallback</b>\n` +
+    `Contract: <code>${escapeHtml(contractAddress)}</code>\n` +
+    `Trying common mint functions...`
+  );
+
   if (DRY_RUN) {
-    console.log(`[dry-run][fallback] Would attempt direct on-chain mint on ${contractAddress}.`);
     await notify(
-      `🧪 <b>Dry run</b>: <code>${escapeHtml(sourceWallet)}</code> minted from <code>${escapeHtml(contractAddress)}</code> — no OpenSea Drop found. ` +
-        `Would attempt a direct on-chain mint (not broadcast).`
+      `🧪 <b>Dry run</b>: would try direct on-chain mint on <code>${escapeHtml(contractAddress)}</code> (not broadcast)`
     );
     return;
   }
 
+  if (!signer && wallets.length === 0) {
+    await notify(`❌ No minting wallet/signer available for direct mint`);
+    return;
+  }
+
   const provider = rpcPool.current();
-  const connectedSigner = signer.connect(provider);
+  const mintWallets = wallets.length > 0 ? wallets : [{
+    address: WALLET_ADDRESS,
+    signer: signer
+  }];
+
+  // More common mint function signatures
+  const EXTRA_MINT_ABIS = [
+    'function mint() public payable',
+    'function mint(uint256 quantity) public payable',
+    'function mint(address to) public payable',
+    'function mint(address to, uint256 quantity) public payable',
+    'function publicMint() public payable',
+    'function publicMint(uint256 quantity) public payable',
+    'function claim() public payable',
+    'function claim(uint256 quantity) public payable',
+    'function claim(address to, uint256 quantity) public payable',
+    'function safeMint(address to) public payable',
+    'function safeMint(address to, uint256 quantity) public payable',
+    'function mintNFT(uint256 quantity) public payable',
+    'function mintPublic(uint256 quantity) public payable',
+  ];
+
   const remoteAbi = await fetchAbiFromExplorer(contractAddress);
+  const quantitiesToTry = [1, 2, 3, 5]; // safer small quantities for direct mint
 
-  const candidates = [];
-  if (remoteAbi) {
-    for (const fnName of ['mint', 'publicMint', 'claim']) {
-      if (abiHasFunction(remoteAbi, fnName)) {
-        candidates.push(new ethers.Contract(contractAddress, remoteAbi, connectedSigner));
+  let anySuccess = false;
+
+  for (const wallet of mintWallets) {
+    const connectedSigner = wallet.signer.connect(provider);
+    const candidates = [];
+
+    // Prefer verified ABI from explorer if available
+    if (remoteAbi) {
+      candidates.push(new ethers.Contract(contractAddress, remoteAbi, connectedSigner));
+    }
+
+    // Always also try common ABIs
+    candidates.push(new ethers.Contract(contractAddress, EXTRA_MINT_ABIS, connectedSigner));
+
+    const overrideValue = process.env.MINT_VALUE_ETH
+      ? ethers.parseEther(process.env.MINT_VALUE_ETH)
+      : 0n;
+
+    let walletSuccess = false;
+
+    for (const contract of candidates) {
+      const attempts = [];
+
+      // Build a list of possible calls
+      for (const qty of quantitiesToTry) {
+        attempts.push(() => contract.mint({ value: overrideValue }));
+        attempts.push(() => contract.mint(qty, { value: overrideValue }));
+        attempts.push(() => contract.mint(wallet.address, { value: overrideValue }));
+        attempts.push(() => contract.mint(wallet.address, qty, { value: overrideValue }));
+        attempts.push(() => contract.publicMint({ value: overrideValue }));
+        attempts.push(() => contract.publicMint(qty, { value: overrideValue }));
+        attempts.push(() => contract.claim({ value: overrideValue }));
+        attempts.push(() => contract.claim(qty, { value: overrideValue }));
+        attempts.push(() => contract.claim(wallet.address, qty, { value: overrideValue }));
+        attempts.push(() => contract.safeMint(wallet.address, { value: overrideValue }));
+        attempts.push(() => contract.safeMint(wallet.address, qty, { value: overrideValue }));
+        attempts.push(() => contract.mintNFT(qty, { value: overrideValue }));
+        attempts.push(() => contract.mintPublic(qty, { value: overrideValue }));
       }
+
+      for (const attempt of attempts) {
+        try {
+          const tx = await attempt();
+          const receipt = await tx.wait();
+
+          if (receipt.status === 1) {
+            await notify(
+              `✅ <b>Direct mint SUCCESS</b>\n` +
+              `Wallet: <code>${escapeHtml(wallet.address)}</code>\n` +
+              `Contract: <code>${escapeHtml(contractAddress)}</code>\n` +
+              `Tx: <code>${escapeHtml(tx.hash)}</code>`
+            );
+            walletSuccess = true;
+            anySuccess = true;
+            break;
+          }
+        } catch (err) {
+          // try next pattern
+          continue;
+        }
+      }
+
+      if (walletSuccess) break;
+    }
+
+    if (!walletSuccess) {
+      await notify(
+        `❌ Direct mint failed for wallet <code>${escapeHtml(wallet.address.slice(0, 10))}...</code>`
+      );
     }
   }
-  if (candidates.length === 0) {
-    candidates.push(new ethers.Contract(contractAddress, COMMON_MINT_ABIS, connectedSigner));
+
+  if (!anySuccess) {
+    await notify(
+      `⚠️ <code>${escapeHtml(sourceWallet)}</code> minted from <code>${escapeHtml(contractAddress)}</code>\n` +
+      `Could not find a working mint function automatically.\n` +
+      `This collection likely needs allowlist/signature or a custom mint method.`
+    );
   }
-
-  const overrideValue = process.env.MINT_VALUE_ETH ? ethers.parseEther(process.env.MINT_VALUE_ETH) : 0n;
-
-  for (const contract of candidates) {
-    for (const attempt of [
-      () => contract.mint({ value: overrideValue }),
-      () => contract.mint(MINT_QUANTITY, { value: overrideValue }),
-      () => contract.mint(WALLET_ADDRESS, MINT_QUANTITY, { value: overrideValue }),
-      () => contract.publicMint(MINT_QUANTITY, { value: overrideValue }),
-      () => contract.claim(MINT_QUANTITY, { value: overrideValue }),
-    ]) {
-      try {
-        const tx = await attempt();
-        const receipt = await tx.wait();
-        const ok = receipt.status === 1;
-        console.log(ok ? `[mint][fallback] ✓ confirmed, tx ${tx.hash}` : `[mint][fallback] ✗ reverted, tx ${tx.hash}`);
-        await notify(
-          ok
-            ? `✅ <b>Copied mint</b> (direct, no OpenSea Drop) from <code>${escapeHtml(contractAddress)}</code>\nTx: <code>${escapeHtml(tx.hash)}</code>`
-            : `⚠️ Direct mint reverted for <code>${escapeHtml(contractAddress)}</code>\nTx: <code>${escapeHtml(tx.hash)}</code>`
-        );
-        return;
-      } catch (err) {
-        continue;
-      }
-    }
-  }
-
-  console.error(`[mint][fallback] Could not find a working mint function for ${contractAddress}.`);
-  await notify(
-    `⚠️ <code>${escapeHtml(sourceWallet)}</code> minted from <code>${escapeHtml(contractAddress)}</code> (no OpenSea Drop) — ` +
-      `couldn't find a working mint function automatically. Manual review needed.`
-  );
 }
 
 // ---------------------------------------------------------------------------
