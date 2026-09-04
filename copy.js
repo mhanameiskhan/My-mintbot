@@ -66,7 +66,7 @@
  */
 
 import 'dotenv/config';
-import { Telegraf } from 'telegraf';
+import { Telegraf, Markup } from 'telegraf';
 import { createClient } from '@supabase/supabase-js';
 import { ethers } from 'ethers';
 import fetch from 'node-fetch';
@@ -248,6 +248,58 @@ async function notify(text) {
     console.error(`[telegram] failed to send message: ${err.message}`);
   }
 }
+
+// ---------- Button Menu ----------
+import { Markup } from 'telegraf';  // if this fails, we'll use another way below
+
+// ===== BUTTON MENU =====
+const mainMenu = Markup.keyboard([
+  ['📊 Status', '👛 Wallets'],
+  ['⚙️ Settings', 'ℹ️ Help']
+]).resize();
+
+bot.start(async (ctx) => {
+  if (!isAuthorizedChat(ctx)) {
+    return ctx.reply('Unauthorized.');
+  }
+  await ctx.reply('🤖 Mint Copy Bot\n\nChoose an option:', mainMenu);
+});
+
+bot.hears('📊 Status', async (ctx) => {
+  if (!isAuthorizedChat(ctx)) return;
+  await ctx.reply(
+    `Chain: ${CHAIN_ID}\n` +
+    `Watched wallets: ${watchedWallets.length}\n` +
+    `Poll interval: ${POLL_INTERVAL_MS}ms\n` +
+    `DRY_RUN: ${DRY_RUN}\n` +
+    `Minting wallets: ${wallets?.length || 1}`
+  );
+});
+
+bot.hears('👛 Wallets', async (ctx) => {
+  if (!isAuthorizedChat(ctx)) return;
+  await refreshWatchedWallets();
+  if (watchedWallets.length === 0) {
+    return ctx.reply('No watched wallets yet.\nUse /addwallet 0x...');
+  }
+  const list = watchedWallets.map((w, i) => `${i + 1}. ${w}`).join('\n');
+  await ctx.reply(`Watching ${watchedWallets.length} wallet(s):\n${list}`);
+});
+
+bot.hears('⚙️ Settings', async (ctx) => {
+  if (!isAuthorizedChat(ctx)) return;
+  await ctx.reply(
+    `Settings\n\nDRY_RUN: ${DRY_RUN}\nMAX_PRICE_ETH: ${MAX_PRICE_ETH ?? 'not set'}\nQUANTITY_TRIES: ${process.env.QUANTITY_TRIES || '10,5,3,2,1'}`
+  );
+});
+
+bot.hears('ℹ️ Help', async (ctx) => {
+  if (!isAuthorizedChat(ctx)) return;
+  await ctx.reply(
+    `Commands:\n/start — show menu\n/addwallet 0x...\n/removewallet 0x...\n/wallets\n/status\n/help`
+  );
+});
+// ===== END BUTTON MENU =====
 
 bot.command('help', (ctx) => {
   ctx.reply(
