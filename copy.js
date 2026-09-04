@@ -222,6 +222,7 @@ async function dbRemoveWallet(address) {
 // In-memory cache, refreshed on a timer so /addwallet takes effect without
 // a restart, but the hot poll loop doesn't hit Supabase every second.
 let watchedWallets = [];
+let isPaused = false;   // when true, bot detects but does not mint
 
 async function refreshWatchedWallets() {
   try {
@@ -252,7 +253,9 @@ async function notify(text) {
 // ===== BUTTON MENU =====
 const mainMenu = Markup.keyboard([
   ['📊 Status', '👛 Wallets'],
-  ['⚙️ Settings', 'ℹ️ Help']
+  ['💰 Balances', '⚙️ Settings'],
+  ['⏸ Pause', '▶️ Resume'],
+  ['ℹ️ Help']
 ]).resize();
 
 bot.start(async (ctx) => {
@@ -295,6 +298,43 @@ bot.hears('ℹ️ Help', async (ctx) => {
   await ctx.reply(
     `Commands:\n/start — show menu\n/addwallet 0x...\n/removewallet 0x...\n/wallets\n/status\n/help`
   );
+});
+
+bot.hears('⏸ Pause', async (ctx) => {
+  if (!isAuthorizedChat(ctx)) return;
+  isPaused = true;
+  await ctx.reply('⏸ Bot paused.\nIt will still detect mints but will not try to mint.');
+});
+
+bot.hears('▶️ Resume', async (ctx) => {
+  if (!isAuthorizedChat(ctx)) return;
+  isPaused = false;
+  await ctx.reply('▶️ Bot resumed.\nMinting is active again.');
+});
+
+bot.hears('💰 Balances', async (ctx) => {
+  if (!isAuthorizedChat(ctx)) return;
+
+  try {
+    const provider = rpcPool.current();
+    const list = wallets.length > 0 ? wallets : [{ address: WALLET_ADDRESS }];
+
+    if (!list[0]?.address) {
+      return ctx.reply('No minting wallets configured.');
+    }
+
+    let message = `💰 <b>Minting wallet balances</b>\n\n`;
+
+    for (const w of list) {
+      const balance = await provider.getBalance(w.address);
+      const eth = Number(ethers.formatEther(balance)).toFixed(5);
+      message += `<code>${escapeHtml(w.address.slice(0, 10))}...</code> → <b>${eth} ETH</b>\n`;
+    }
+
+    await ctx.reply(message, { parse_mode: 'HTML' });
+  } catch (err) {
+    await ctx.reply(`❌ Failed to fetch balances: ${err.message}`);
+  }
 });
 // ===== END BUTTON MENU =====
 
@@ -642,6 +682,11 @@ async function attemptDirectMint(contractAddress, sourceWallet) {
 // ---------------------------------------------------------------------------
 
 async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
+    if (isPaused) {
+    await notify(`⏸ Mint detected but bot is paused. Skipping.`);
+    return;
+  }
+  
   console.log(`\n[mint detected] wallet=${sourceWallet} contract=${contractAddress} source_tx=${sourceTxHash}`);
 
   // Detect quantity
