@@ -174,6 +174,62 @@ if (!DRY_RUN) {
   }
 }
 
+// ===== MULTI-CHAIN FOUNDATION (Stage 1) =====
+const RH_ENABLED = (process.env.RH_ENABLED || 'true').toLowerCase() !== 'false';
+const ETH_ENABLED = (process.env.ETH_ENABLED || 'false').toLowerCase() === 'true';
+
+const RH_MAX_PRICE_ETH =
+  process.env.RH_MAX_PRICE_ETH === undefined || String(process.env.RH_MAX_PRICE_ETH).trim() === ''
+    ? MAX_PRICE_ETH
+    : Number(process.env.RH_MAX_PRICE_ETH);
+
+const ETH_MAX_PRICE_ETH =
+  process.env.ETH_MAX_PRICE_ETH === undefined || String(process.env.ETH_MAX_PRICE_ETH).trim() === ''
+    ? MAX_PRICE_ETH
+    : Number(process.env.ETH_MAX_PRICE_ETH);
+
+const RH_DRY_RUN = (process.env.RH_DRY_RUN || (DRY_RUN ? 'true' : 'false')).toLowerCase() !== 'false';
+const ETH_DRY_RUN = (process.env.ETH_DRY_RUN || (DRY_RUN ? 'true' : 'false')).toLowerCase() !== 'false';
+
+const chainConfigs = {
+  robinhood: {
+    name: 'robinhood',
+    enabled: RH_ENABLED,
+    chainId: Number(process.env.RH_CHAIN_ID || CHAIN_ID || 4663),
+    rpcUrls: (process.env.RH_RPC_URLS || process.env.RPC_URLS || '')
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean),
+    openseaSlug: process.env.RH_OPENSEA_SLUG || process.env.OPENSEA_CHAIN_SLUG || 'robinhood',
+    explorerApiBase: process.env.RH_EXPLORER_API_BASE || EXPLORER_API_BASE,
+    explorerApiKey: process.env.RH_EXPLORER_API_KEY || EXPLORER_API_KEY || '',
+    maxPriceEth: RH_MAX_PRICE_ETH,
+    dryRun: RH_DRY_RUN,
+  },
+  ethereum: {
+    name: 'ethereum',
+    enabled: ETH_ENABLED,
+    chainId: Number(process.env.ETH_CHAIN_ID || 1),
+    rpcUrls: (process.env.ETH_RPC_URLS || '')
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean),
+    openseaSlug: process.env.ETH_OPENSEA_SLUG || 'ethereum',
+    explorerApiBase: process.env.ETH_EXPLORER_API_BASE || 'https://api.etherscan.io/api',
+    explorerApiKey: process.env.ETH_EXPLORER_API_KEY || '',
+    maxPriceEth: ETH_MAX_PRICE_ETH,
+    dryRun: ETH_DRY_RUN,
+  }
+};
+
+console.log('[chains] Robinhood enabled:', chainConfigs.robinhood.enabled, 'RPCs:', chainConfigs.robinhood.rpcUrls.length);
+console.log('[chains] Ethereum enabled:', chainConfigs.ethereum.enabled, 'RPCs:', chainConfigs.ethereum.rpcUrls.length);
+
+if (chainConfigs.ethereum.enabled && chainConfigs.ethereum.rpcUrls.length === 0) {
+  console.warn('[chains] ETH_ENABLED=true but ETH_RPC_URLS is empty');
+}
+// ===== END MULTI-CHAIN FOUNDATION =====
+
 const NULL_ADDRESS = '0x0000000000000000000000000000000000000000';
 const ERC721_TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
 const OPENSEA_BASE = 'https://api.opensea.io/api/v2';
@@ -971,8 +1027,14 @@ async function main() {
   console.log('[telegram] bot launch initiated');
 
   await notify(
-    `🤖 Bot started. Watching ${watchedWallets.length} wallet(s) on chain ${CHAIN_ID} every ${POLL_INTERVAL_MS}ms. DRY_RUN=${DRY_RUN}`
-  );
+  `🤖 <b>Bot started</b>\n` +
+  `Watched wallets: <b>${watchedWallets.length}</b>\n` +
+  `Poll: <b>${POLL_INTERVAL_MS}ms</b>\n\n` +
+  `🟦 Robinhood: <b>${chainConfigs.robinhood.enabled ? 'ON' : 'OFF'}</b> (dryRun=${chainConfigs.robinhood.dryRun})\n` +
+  `⬛ Ethereum: <b>${chainConfigs.ethereum.enabled ? 'ON' : 'OFF'}</b> (dryRun=${chainConfigs.ethereum.dryRun})\n\n` +
+  `Stage 1: multi-chain foundation loaded.\n` +
+  `Robinhood minting still active as before.`
+);
   console.log('[startup] Telegram notify sent, entering poll loop');
 
   pollLoop();
