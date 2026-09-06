@@ -1052,16 +1052,21 @@ async function findEthMintsInRange(fromBlock, toBlock) {
 async function ethPollLoop() {
   if (!chainConfigs.ethereum.enabled || !ethRpcPool) return;
 
-  if (ethLastCheckedBlock === null) {
-    ethLastCheckedBlock = await getEthLatestBlock();
-    console.log(`[eth-init] starting from block ${ethLastCheckedBlock}`);
-  }
-
   try {
     const latest = await getEthLatestBlock();
-    if (latest > ethLastCheckedBlock) {
-      const MAX_BLOCKS_PER_SCAN = 500; // smaller on ETH public RPC
-      const toBlock = Math.min(ethLastCheckedBlock + MAX_BLOCKS_PER_SCAN, latest);
+
+    // Stay 2 blocks behind head to avoid public RPC errors
+    const safeLatest = Math.max(latest - 2, 0);
+
+    if (ethLastCheckedBlock === null) {
+      ethLastCheckedBlock = safeLatest;
+      console.log(`[eth-init] starting from block ${ethLastCheckedBlock}`);
+    }
+
+    if (safeLatest > ethLastCheckedBlock) {
+      const MAX_BLOCKS_PER_SCAN = 200; // smaller range for public ETH RPC
+      const toBlock = Math.min(ethLastCheckedBlock + MAX_BLOCKS_PER_SCAN, safeLatest);
+
       console.log(`[eth-poll] scanning blocks ${ethLastCheckedBlock + 1} → ${toBlock}`);
 
       const mints = await findEthMintsInRange(ethLastCheckedBlock + 1, toBlock);
@@ -1074,6 +1079,7 @@ async function ethPollLoop() {
           `Detection only (minting comes in next stage)`
         );
       }
+
       ethLastCheckedBlock = toBlock;
     }
   } catch (err) {
