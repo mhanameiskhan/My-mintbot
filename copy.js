@@ -582,6 +582,15 @@ if (!DRY_RUN) {
 const signer = wallets.length > 0 ? wallets[0].signer.connect(rpcPool.current()) : null;
 const WALLET_ADDRESS_EFFECTIVE = wallets.length > 0 ? wallets[0].address : WALLET_ADDRESS;
 
+// ===== Ethereum RPC pool (Stage 2) =====
+const ethRpcPool = chainConfigs.ethereum.enabled && chainConfigs.ethereum.rpcUrls.length > 0
+  ? new RpcPool(chainConfigs.ethereum.rpcUrls, chainConfigs.ethereum.chainId)
+  : null;
+
+let ethLastCheckedBlock = null;
+const ethSeenTxHashes = new Set();
+// ===== End Ethereum RPC pool =====
+
 // ---------------------------------------------------------------------------
 // OpenSea helpers
 // ---------------------------------------------------------------------------
@@ -1008,6 +1017,73 @@ async function pollLoop() {
   setTimeout(pollLoop, POLL_INTERVAL_MS);
 }
 
+// ===== Ethereum watcher (Stage 2 Piece 1: detect only) =====
+async function getEthLatestBlock() {
+  if (!ethRpcPool) throw new Error('Ethereum RPC pool not initialized');
+  return ethRpcPool.withFailover((p) => p.getBlockNumber());
+}
+
+async function findEthMintsInRange(fromBlock, toBlock) {
+  const paddedNull = ethers.zeroPadValue(NULL_ADDRESS, 32);
+  const logs = await ethRpcPool.withFailover((p) =>
+    p.getLogs({
+      fromBlock,
+      toBlock,
+      topics: [ERC721_TRANSFER_TOPIC, paddedNull],
+    })
+  );
+
+  const mints = [];
+  for (const log of logs) {
+    if (log.topics.length < 3) continue;
+    const toAddress = ethers.getAddress('0x' + log.topics[2].slice(26)).toLowerCase();
+    if (!watchedWallets.includes(toAddress)) continue;
+    if (ethSeenTxHashes.has(log.transactionHash)) continue;
+    ethSeenTxHashes.add(log.transactionHash);
+    mints.push({
+      contractAddress: log.address,
+      txHash: log.transactionHash,
+      wallet: toAddress,
+    });
+  }
+  return mints;
+}
+
+async function ethPollLoop() {
+  if (!chainConfigs.ethereum.enabled || !ethRpcPool) return;
+
+  if (ethLastCheckedBlock === null) {
+    ethLastCheckedBlock = await getEthLatestBlock();
+    console.log(`[eth-init] starting from block ${ethLastCheckedBlock}`);
+  }
+
+  try {
+    const latest = await getEthLatestBlock();
+    if (latest > ethLastCheckedBlock) {
+      const MAX_BLOCKS_PER_SCAN = 500; // smaller on ETH public RPC
+      const toBlock = Math.min(ethLastCheckedBlock + MAX_BLOCKS_PER_SCAN, latest);
+      console.log(`[eth-poll] scanning blocks ${ethLastCheckedBlock + 1} → ${toBlock}`);
+
+      const mints = await findEthMintsInRange(ethLastCheckedBlock + 1, toBlock);
+      for (const mint of mints) {
+        await notify(
+          `⬛ <b>ETH Mint detected</b>\n` +
+          `Wallet: <code>${escapeHtml(mint.wallet)}</code>\n` +
+          `Contract: <code>${escapeHtml(mint.contractAddress)}</code>\n` +
+          `Tx: <code>${escapeHtml(mint.txHash)}</code>\n` +
+          `Detection only (minting comes in next stage)`
+        );
+      }
+      ethLastCheckedBlock = toBlock;
+    }
+  } catch (err) {
+    console.error(`[eth-poll] ${err.message}`);
+  }
+
+  setTimeout(ethPollLoop, POLL_INTERVAL_MS);
+}
+// ===== End Ethereum watcher =====
+
 // ---------------------------------------------------------------------------
 // Startup
 // ---------------------------------------------------------------------------
@@ -1038,6 +1114,10 @@ async function main() {
   console.log('[startup] Telegram notify sent, entering poll loop');
 
   pollLoop();
+  if (chainConfigs.ethereum.enabled && ethRpcPool) {
+  console.log('[startup] starting Ethereum poll loop...');
+  ethPollLoop();
+}
 }
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
