@@ -612,8 +612,8 @@ async function openseaFetch(path_, { method, body } = {}) {
   return res.json();
 }
 
-async function resolveCollectionSlug(contractAddress) {
-  const data = await openseaFetch(`/chain/${OPENSEA_CHAIN_SLUG}/contract/${contractAddress}`);
+async function resolveCollectionSlug(contractAddress, openseaSlug = OPENSEA_CHAIN_SLUG) {
+  const data = await openseaFetch(`/chain/${openseaSlug}/contract/${contractAddress}`);
   return data.collection || null;
 }
 
@@ -781,9 +781,21 @@ async function attemptDirectMint(contractAddress, sourceWallet) {
 // Mint-copy pipeline
 // ---------------------------------------------------------------------------
 
-async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
+async function copyMint(contractAddress, sourceTxHash, sourceWallet, chainName = 'robinhood') {
     if (isPaused) {
     await notify(`⏸ Mint detected but bot is paused. Skipping.`);
+    return;
+  }
+
+    const chain = chainConfigs[chainName] || chainConfigs.robinhood;
+  const activeRpcPool = chainName === 'ethereum' ? ethRpcPool : rpcPool;
+  const activeDryRun = chain.dryRun;
+  const activeMaxPrice = chain.maxPriceEth;
+  const activeOpenseaSlug = chain.openseaSlug;
+  const chainLabel = chainName === 'ethereum' ? '⬛ ETH' : '🟦 RH';
+
+  if (!activeRpcPool) {
+    await notify(`${chainLabel} mint skipped: RPC pool not ready`);
     return;
   }
 
@@ -792,8 +804,8 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
   // Detect quantity
   let detectedQty = 1;
   try {
-    const provider = rpcPool.current();
-    const receipt = await provider.getTransactionReceipt(sourceTxHash);
+    const provider = activeRpcPool.current();
+const receipt = await provider.getTransactionReceipt(sourceTxHash);
     if (receipt?.logs) {
       let count = 0;
       for (const log of receipt.logs) {
@@ -824,10 +836,10 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
   // Resolve collection
   let slug = null;
   try {
-    slug = await resolveCollectionSlug(contractAddress);
+    slug = await resolveCollectionSlug(contractAddress, activeOpenseaSlug);
   } catch (err) {
     await notify(
-      `🔔 <b>Mint detected</b>\n` +
+      `🔔 <b>${chainLabel} Mint detected</b>\n` +
       `From: <code>${escapeHtml(sourceWallet)}</code>\n` +
       `Contract: <code>${escapeHtml(contractAddress)}</code>\n` +
       `⚠️ OpenSea lookup failed → trying direct mint`
@@ -837,7 +849,7 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
 
   if (!slug) {
     await notify(
-      `🔔 <b>Mint detected</b>\n` +
+      `🔔 <b>${chainLabel} Mint detected</b>\n` +
       `From: <code>${escapeHtml(sourceWallet)}</code>\n` +
       `Contract: <code>${escapeHtml(contractAddress)}</code>\n` +
       `⚠️ No OpenSea Drop found → trying direct mint`
@@ -847,7 +859,7 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
 
   // Initial summary message
   await notify(
-    `🔔 <b>Mint detected</b>\n` +
+    `🔔 <b>${chainLabel} Mint detected</b>\n` +
     `From: <code>${escapeHtml(sourceWallet)}</code>\n` +
     `Collection: <code>${escapeHtml(slug)}</code>\n` +
     `Detected qty: <b>${detectedQty}</b>\n` +
@@ -855,9 +867,9 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
     `Wallets: <b>${wallets.length || 1}</b>`
   );
 
-  const mintWallets = DRY_RUN
-    ? [{ address: (wallets[0]?.address || WALLET_ADDRESS || ethers.ZeroAddress) }]
-    : wallets;
+  const mintWallets = activeDryRun
+  ? [{ address: (wallets[0]?.address || WALLET_ADDRESS || ethers.ZeroAddress) }]
+  : wallets;
 
   if (mintWallets.length === 0) {
     await notify(`❌ No minting wallets configured`);
@@ -889,12 +901,12 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
       const valueWei = BigInt(value || '0');
       const valueEth = Number(ethers.formatEther(valueWei));
 
-      if (MAX_PRICE_ETH !== null && valueEth > MAX_PRICE_ETH) {
-        lastError = `Price ${valueEth} ETH above limit`;
-        continue;
-      }
+      if (activeMaxPrice !== null && valueEth > activeMaxPrice) {
+  lastError = `Price ${valueEth} ETH above limit`;
+  continue;
+}
 
-      if (DRY_RUN) {
+      if (activeDryRun) {
         results.push(`🧪 Dry run: would mint ${qty} with ${wallet.address.slice(0, 10)}... (${valueEth} ETH)`);
         walletSuccess = true;
         successCount++;
@@ -903,7 +915,7 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet) {
 
       // Real mint
       try {
-        const provider = rpcPool.current();
+        const provider = activeRpcPool.current();
         const connectedSigner = wallet.signer.connect(provider);
 
         const balance = await provider.getBalance(wallet.address);
@@ -1071,14 +1083,8 @@ async function ethPollLoop() {
 
       const mints = await findEthMintsInRange(ethLastCheckedBlock + 1, toBlock);
       for (const mint of mints) {
-        await notify(
-          `⬛ <b>ETH Mint detected</b>\n` +
-          `Wallet: <code>${escapeHtml(mint.wallet)}</code>\n` +
-          `Contract: <code>${escapeHtml(mint.contractAddress)}</code>\n` +
-          `Tx: <code>${escapeHtml(mint.txHash)}</code>\n` +
-          `Detection only (minting comes in next stage)`
-        );
-      }
+  await copyMint(mint.contractAddress, mint.txHash, mint.wallet, 'ethereum');
+}
 
       ethLastCheckedBlock = toBlock;
     }
