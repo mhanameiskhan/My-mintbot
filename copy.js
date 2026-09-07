@@ -329,26 +329,40 @@ bot.hears('📊 Status', async (ctx) => {
   if (!isAuthorizedChat(ctx)) return;
 
   const mintingWalletsCount = wallets?.length || (WALLET_ADDRESS ? 1 : 0);
-  const pauseText = isPaused ? '⏸ Paused' : '▶️ Running';
-  const dryRunText = DRY_RUN ? '🧪 Dry Run (ON)' : '🔥 Live Minting (OFF)';
+
+  const globalState = isPaused ? '⏸ Paused' : '▶️ Running';
+  const rhState = isRhPaused ? '⏸ Paused' : '▶️ Running';
+  const ethState = isEthPaused ? '⏸ Paused' : '▶️ Running';
+
+  const rhMode = chainConfigs.robinhood.dryRun ? '🧪 Dry Run' : '🔥 Live';
+  const ethMode = chainConfigs.ethereum.dryRun ? '🧪 Dry Run' : '🔥 Live';
 
   let mintingList = 'None';
   if (wallets && wallets.length > 0) {
-    mintingList = wallets.map((w, i) => `${i + 1}. <code>${escapeHtml(w.address.slice(0, 12))}...</code>`).join('\n');
+    mintingList = wallets
+      .map((w, i) => `${i + 1}. <code>${escapeHtml(w.address.slice(0, 12))}...</code>`)
+      .join('\n');
   } else if (WALLET_ADDRESS) {
     mintingList = `<code>${escapeHtml(WALLET_ADDRESS.slice(0, 12))}...</code>`;
   }
 
   const message =
     `📊 <b>Bot Status</b>\n\n` +
-    `State: <b>${pauseText}</b>\n` +
-    `Mode: <b>${dryRunText}</b>\n` +
-    `Chain: <b>${CHAIN_ID}</b>\n` +
-    `Poll interval: <b>${POLL_INTERVAL_MS}ms</b>\n\n` +
-    `👀 Watched wallets: <b>${watchedWallets.length}</b>\n` +
-    `💼 Minting wallets: <b>${mintingWalletsCount}</b>\n` +
+    `Global: <b>${globalState}</b>\n` +
+    `Poll: <b>${POLL_INTERVAL_MS}ms</b>\n` +
+    `Watched wallets: <b>${watchedWallets.length}</b>\n` +
+    `Minting wallets: <b>${mintingWalletsCount}</b>\n` +
     `${mintingList}\n\n` +
-    `💰 Max price: <b>${MAX_PRICE_ETH ?? 'not set'} ETH</b>\n` +
+    `🟢 <b>Robinhood</b>\n` +
+    `State: <b>${rhState}</b>\n` +
+    `Mode: <b>${rhMode}</b>\n` +
+    `Enabled: <b>${chainConfigs.robinhood.enabled ? 'ON' : 'OFF'}</b>\n` +
+    `Max price: <b>${chainConfigs.robinhood.maxPriceEth ?? 'not set'}</b>\n\n` +
+    `🟦 <b>Ethereum</b>\n` +
+    `State: <b>${ethState}</b>\n` +
+    `Mode: <b>${ethMode}</b>\n` +
+    `Enabled: <b>${chainConfigs.ethereum.enabled ? 'ON' : 'OFF'}</b>\n` +
+    `Max price: <b>${chainConfigs.ethereum.maxPriceEth ?? 'not set'}</b>\n\n` +
     `🔢 Quantities: <b>${process.env.QUANTITY_TRIES || '10,5,3,2,1'}</b>`;
 
   await ctx.reply(message, { parse_mode: 'HTML' });
@@ -554,26 +568,40 @@ bot.command('status', async (ctx) => {
   if (!isAuthorizedChat(ctx)) return;
 
   const mintingWalletsCount = wallets?.length || (WALLET_ADDRESS ? 1 : 0);
-  const pauseText = isPaused ? '⏸ Paused' : '▶️ Running';
-  const dryRunText = DRY_RUN ? '🧪 Dry Run (ON)' : '🔥 Live Minting (OFF)';
+
+  const globalState = isPaused ? '⏸ Paused' : '▶️ Running';
+  const rhState = isRhPaused ? '⏸ Paused' : '▶️ Running';
+  const ethState = isEthPaused ? '⏸ Paused' : '▶️ Running';
+
+  const rhMode = chainConfigs.robinhood.dryRun ? '🧪 Dry Run' : '🔥 Live';
+  const ethMode = chainConfigs.ethereum.dryRun ? '🧪 Dry Run' : '🔥 Live';
 
   let mintingList = 'None';
   if (wallets && wallets.length > 0) {
-    mintingList = wallets.map((w, i) => `${i + 1}. <code>${escapeHtml(w.address.slice(0, 12))}...</code>`).join('\n');
+    mintingList = wallets
+      .map((w, i) => `${i + 1}. <code>${escapeHtml(w.address.slice(0, 12))}...</code>`)
+      .join('\n');
   } else if (WALLET_ADDRESS) {
     mintingList = `<code>${escapeHtml(WALLET_ADDRESS.slice(0, 12))}...</code>`;
   }
 
   const message =
     `📊 <b>Bot Status</b>\n\n` +
-    `State: <b>${pauseText}</b>\n` +
-    `Mode: <b>${dryRunText}</b>\n` +
-    `Chain: <b>${CHAIN_ID}</b>\n` +
-    `Poll interval: <b>${POLL_INTERVAL_MS}ms</b>\n\n` +
-    `👀 Watched wallets: <b>${watchedWallets.length}</b>\n` +
-    `💼 Minting wallets: <b>${mintingWalletsCount}</b>\n` +
+    `Global: <b>${globalState}</b>\n` +
+    `Poll: <b>${POLL_INTERVAL_MS}ms</b>\n` +
+    `Watched wallets: <b>${watchedWallets.length}</b>\n` +
+    `Minting wallets: <b>${mintingWalletsCount}</b>\n` +
     `${mintingList}\n\n` +
-    `💰 Max price: <b>${MAX_PRICE_ETH ?? 'not set'} ETH</b>\n` +
+    `🟢 <b>Robinhood</b>\n` +
+    `State: <b>${rhState}</b>\n` +
+    `Mode: <b>${rhMode}</b>\n` +
+    `Enabled: <b>${chainConfigs.robinhood.enabled ? 'ON' : 'OFF'}</b>\n` +
+    `Max price: <b>${chainConfigs.robinhood.maxPriceEth ?? 'not set'}</b>\n\n` +
+    `🟦 <b>Ethereum</b>\n` +
+    `State: <b>${ethState}</b>\n` +
+    `Mode: <b>${ethMode}</b>\n` +
+    `Enabled: <b>${chainConfigs.ethereum.enabled ? 'ON' : 'OFF'}</b>\n` +
+    `Max price: <b>${chainConfigs.ethereum.maxPriceEth ?? 'not set'}</b>\n\n` +
     `🔢 Quantities: <b>${process.env.QUANTITY_TRIES || '10,5,3,2,1'}</b>`;
 
   await ctx.reply(message, { parse_mode: 'HTML' });
