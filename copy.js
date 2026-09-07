@@ -279,6 +279,8 @@ async function dbRemoveWallet(address) {
 // a restart, but the hot poll loop doesn't hit Supabase every second.
 let watchedWallets = [];
 let isPaused = false;   // when true, bot detects but does not mint
+let isRhPaused = false;
+let isEthPaused = false;
 
 async function refreshWatchedWallets() {
   try {
@@ -309,8 +311,10 @@ async function notify(text) {
 // ===== BUTTON MENU =====
 const mainMenu = Markup.keyboard([
   ['📊 Status', '👛 Wallets'],
-  ['💰 Balances', '⚙️ Settings'],
-  ['⏸ Pause', '▶️ Resume'],
+  ['💰 RH Balances', '💎 ETH Balances'],
+  ['⏸ Pause RH', '▶️ Resume RH'],
+  ['⏸ Pause ETH', '▶️ Resume ETH'],
+  ['⏸ Pause All', '▶️ Resume All'],
   ['ℹ️ Help']
 ]).resize();
 
@@ -408,6 +412,81 @@ bot.hears('💰 Balances', async (ctx) => {
     await ctx.reply(message, { parse_mode: 'HTML' });
   } catch (err) {
     await ctx.reply(`❌ Failed to fetch balances: ${err.message}`);
+  }
+});
+
+bot.hears('⏸ Pause RH', async (ctx) => {
+  if (!isAuthorizedChat(ctx)) return;
+  isRhPaused = true;
+  await ctx.reply('⏸ Robinhood paused');
+});
+
+bot.hears('▶️ Resume RH', async (ctx) => {
+  if (!isAuthorizedChat(ctx)) return;
+  isRhPaused = false;
+  await ctx.reply('▶️ Robinhood resumed');
+});
+
+bot.hears('⏸ Pause ETH', async (ctx) => {
+  if (!isAuthorizedChat(ctx)) return;
+  isEthPaused = true;
+  await ctx.reply('⏸ Ethereum paused');
+});
+
+bot.hears('▶️ Resume ETH', async (ctx) => {
+  if (!isAuthorizedChat(ctx)) return;
+  isEthPaused = false;
+  await ctx.reply('▶️ Ethereum resumed');
+});
+
+bot.hears('⏸ Pause All', async (ctx) => {
+  if (!isAuthorizedChat(ctx)) return;
+  isPaused = true;
+  isRhPaused = true;
+  isEthPaused = true;
+  await ctx.reply('⏸ All minting paused');
+});
+
+bot.hears('▶️ Resume All', async (ctx) => {
+  if (!isAuthorizedChat(ctx)) return;
+  isPaused = false;
+  isRhPaused = false;
+  isEthPaused = false;
+  await ctx.reply('▶️ All minting resumed');
+});
+
+bot.hears('💰 RH Balances', async (ctx) => {
+  if (!isAuthorizedChat(ctx)) return;
+  try {
+    const provider = rpcPool.current();
+    const list = wallets.length > 0 ? wallets : [{ address: WALLET_ADDRESS }];
+    let message = `💰 <b>Robinhood balances</b>\n\n`;
+    for (const w of list) {
+      const balance = await provider.getBalance(w.address);
+      const eth = Number(ethers.formatEther(balance)).toFixed(5);
+      message += `<code>${escapeHtml(w.address.slice(0, 10))}...</code> → <b>${eth}</b>\n`;
+    }
+    await ctx.reply(message, { parse_mode: 'HTML' });
+  } catch (err) {
+    await ctx.reply(`❌ RH balances failed: ${err.message}`);
+  }
+});
+
+bot.hears('💎 ETH Balances', async (ctx) => {
+  if (!isAuthorizedChat(ctx)) return;
+  try {
+    if (!ethRpcPool) return ctx.reply('Ethereum RPC not ready');
+    const provider = ethRpcPool.current();
+    const list = wallets.length > 0 ? wallets : [{ address: WALLET_ADDRESS }];
+    let message = `💎 <b>Ethereum balances</b>\n\n`;
+    for (const w of list) {
+      const balance = await provider.getBalance(w.address);
+      const eth = Number(ethers.formatEther(balance)).toFixed(5);
+      message += `<code>${escapeHtml(w.address.slice(0, 10))}...</code> → <b>${eth} ETH</b>\n`;
+    }
+    await ctx.reply(message, { parse_mode: 'HTML' });
+  } catch (err) {
+    await ctx.reply(`❌ ETH balances failed: ${err.message}`);
   }
 });
 // ===== END BUTTON MENU =====
@@ -777,6 +856,21 @@ async function attemptDirectMint(contractAddress, sourceWallet) {
   }
 }
 
+function cleanOpenSeaError(msg) {
+  const text = String(msg || '');
+
+  if (text.includes('Drop not foun')) return 'Drop not found on OpenSea';
+  if (text.includes('Insufficient b')) return 'Insufficient balance/allocation';
+  if (text.includes('Wallet is not')) return 'Wallet not eligible';
+  if (text.includes('422')) return 'OpenSea rejected mint (422)';
+  if (text.includes('404')) return 'OpenSea drop not found (404)';
+
+  return text
+    .replace(/\s+/g, ' ')
+    .replace(/\{[^}]*\}/g, '')
+    .slice(0, 80);
+}
+
 // ---------------------------------------------------------------------------
 // Mint-copy pipeline
 // ---------------------------------------------------------------------------
@@ -792,7 +886,16 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet, chainName =
   const activeDryRun = chain.dryRun;
   const activeMaxPrice = chain.maxPriceEth;
   const activeOpenseaSlug = chain.openseaSlug;
-  const chainLabel = chainName === 'ethereum' ? '⬛ ETH' : '🟦 RH';
+  const chainLabel = chainName === 'ethereum' ? '🟦 ETH' : '🟢 RH';
+
+  if (chainName === 'ethereum' && isEthPaused) {
+  await notify(`⏸ ETH is paused. Skipping.`);
+  return;
+}
+if (chainName === 'robinhood' && isRhPaused) {
+  await notify(`⏸ Robinhood is paused. Skipping.`);
+  return;
+}
 
   if (!activeRpcPool) {
     await notify(`${chainLabel} mint skipped: RPC pool not ready`);
@@ -888,7 +991,7 @@ const receipt = await provider.getTransactionReceipt(sourceTxHash);
       try {
         raw = await buildDropMintTransaction(slug, wallet.address, qty);
       } catch (err) {
-        lastError = err.message || 'OpenSea build failed';
+        lastError = cleanOpenSeaError(err.message || 'OpenSea build failed');
         continue;
       }
 
