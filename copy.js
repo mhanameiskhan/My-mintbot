@@ -731,31 +731,25 @@ function abiHasFunction(abi, name) {
 }
 
 async function attemptDirectMint(contractAddress, sourceWallet) {
-  await notify(
-    `⚙️ <b>Direct mint fallback</b>\n` +
-    `Contract: <code>${escapeHtml(contractAddress)}</code>\n` +
-    `Trying common mint functions...`
-  );
-
   if (DRY_RUN) {
     await notify(
-      `🧪 <b>Dry run</b>: would try direct on-chain mint on <code>${escapeHtml(contractAddress)}</code> (not broadcast)`
+      `⚙️ <b>Direct mint fallback</b>\n` +
+      `Contract: <code>${escapeHtml(contractAddress)}</code>\n` +
+      `🧪 Dry run only (not broadcast)`
     );
     return;
   }
 
   if (!signer && wallets.length === 0) {
-    await notify(`❌ No minting wallet/signer available for direct mint`);
+    await notify(`❌ No minting wallet available for direct mint`);
     return;
   }
 
   const provider = rpcPool.current();
-  const mintWallets = wallets.length > 0 ? wallets : [{
-    address: WALLET_ADDRESS,
-    signer: signer
-  }];
+  const mintWallets = wallets.length > 0
+    ? wallets
+    : [{ address: WALLET_ADDRESS, signer: signer }];
 
-  // More common mint function signatures
   const EXTRA_MINT_ABIS = [
     'function mint() public payable',
     'function mint(uint256 quantity) public payable',
@@ -773,20 +767,17 @@ async function attemptDirectMint(contractAddress, sourceWallet) {
   ];
 
   const remoteAbi = await fetchAbiFromExplorer(contractAddress);
-  const quantitiesToTry = [1, 2, 3, 5]; // safer small quantities for direct mint
-
+  const quantitiesToTry = [1, 2, 3, 5];
+  const results = [];
   let anySuccess = false;
 
   for (const wallet of mintWallets) {
     const connectedSigner = wallet.signer.connect(provider);
     const candidates = [];
 
-    // Prefer verified ABI from explorer if available
     if (remoteAbi) {
       candidates.push(new ethers.Contract(contractAddress, remoteAbi, connectedSigner));
     }
-
-    // Always also try common ABIs
     candidates.push(new ethers.Contract(contractAddress, EXTRA_MINT_ABIS, connectedSigner));
 
     const overrideValue = process.env.MINT_VALUE_ETH
@@ -797,8 +788,6 @@ async function attemptDirectMint(contractAddress, sourceWallet) {
 
     for (const contract of candidates) {
       const attempts = [];
-
-      // Build a list of possible calls
       for (const qty of quantitiesToTry) {
         attempts.push(() => contract.mint({ value: overrideValue }));
         attempts.push(() => contract.mint(qty, { value: overrideValue }));
@@ -819,41 +808,36 @@ async function attemptDirectMint(contractAddress, sourceWallet) {
         try {
           const tx = await attempt();
           const receipt = await tx.wait();
-
           if (receipt.status === 1) {
-            await notify(
-              `✅ <b>Direct mint SUCCESS</b>\n` +
-              `Wallet: <code>${escapeHtml(wallet.address)}</code>\n` +
-              `Contract: <code>${escapeHtml(contractAddress)}</code>\n` +
-              `Tx: <code>${escapeHtml(tx.hash)}</code>`
-            );
+            results.push(`✅ ${wallet.address.slice(0, 10)}... tx ${tx.hash.slice(0, 12)}...`);
             walletSuccess = true;
             anySuccess = true;
             break;
           }
         } catch (err) {
-          // try next pattern
           continue;
         }
       }
-
       if (walletSuccess) break;
     }
 
     if (!walletSuccess) {
-      await notify(
-        `❌ Direct mint failed for wallet <code>${escapeHtml(wallet.address.slice(0, 10))}...</code>`
-      );
+      results.push(`❌ ${wallet.address.slice(0, 10)}... failed`);
     }
   }
 
+  let msg =
+    `⚙️ <b>Direct mint fallback</b>\n` +
+    `From: <code>${escapeHtml(sourceWallet)}</code>\n` +
+    `Contract: <code>${escapeHtml(contractAddress)}</code>\n` +
+    `Success: <b>${anySuccess ? 'yes' : 'no'}</b>\n\n` +
+    results.join('\n');
+
   if (!anySuccess) {
-    await notify(
-      `⚠️ <code>${escapeHtml(sourceWallet)}</code> minted from <code>${escapeHtml(contractAddress)}</code>\n` +
-      `Could not find a working mint function automatically.\n` +
-      `This collection likely needs allowlist/signature or a custom mint method.`
-    );
+    msg += `\n\n⚠️ Likely allowlist/signature or custom mint method.`;
   }
+
+  await notify(msg);
 }
 
 function cleanOpenSeaError(msg) {
