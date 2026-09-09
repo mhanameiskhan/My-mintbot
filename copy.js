@@ -219,11 +219,29 @@ const chainConfigs = {
     explorerApiKey: process.env.ETH_EXPLORER_API_KEY || '',
     maxPriceEth: ETH_MAX_PRICE_ETH,
     dryRun: ETH_DRY_RUN,
+  },
+    arc: {
+    name: 'arc',
+    enabled: (process.env.ARC_ENABLED || 'false').toLowerCase() === 'true',
+    chainId: Number(process.env.ARC_CHAIN_ID || 0),
+    rpcUrls: (process.env.ARC_RPC_URLS || '')
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean),
+    openseaSlug: process.env.ARC_OPENSEA_SLUG || '',
+    explorerApiBase: process.env.ARC_EXPLORER_API_BASE || '',
+    explorerApiKey: process.env.ARC_EXPLORER_API_KEY || '',
+    maxPriceEth:
+      process.env.ARC_MAX_PRICE_ETH === undefined || String(process.env.ARC_MAX_PRICE_ETH).trim() === ''
+        ? 0
+        : Number(process.env.ARC_MAX_PRICE_ETH),
+    dryRun: (process.env.ARC_DRY_RUN || 'true').toLowerCase() !== 'false',
   }
 };
 
 console.log('[chains] Robinhood enabled:', chainConfigs.robinhood.enabled, 'RPCs:', chainConfigs.robinhood.rpcUrls.length);
 console.log('[chains] Ethereum enabled:', chainConfigs.ethereum.enabled, 'RPCs:', chainConfigs.ethereum.rpcUrls.length);
+console.log('[chains] ARC enabled:', chainConfigs.arc.enabled, 'RPCs:', chainConfigs.arc.rpcUrls.length);
 
 if (chainConfigs.ethereum.enabled && chainConfigs.ethereum.rpcUrls.length === 0) {
   console.warn('[chains] ETH_ENABLED=true but ETH_RPC_URLS is empty');
@@ -1235,6 +1253,7 @@ async function main() {
   `Poll: <b>${POLL_INTERVAL_MS}ms</b>\n\n` +
   `🟦 Robinhood: <b>${chainConfigs.robinhood.enabled ? 'ON' : 'OFF'}</b> (dryRun=${chainConfigs.robinhood.dryRun})\n` +
   `⬛ Ethereum: <b>${chainConfigs.ethereum.enabled ? 'ON' : 'OFF'}</b> (dryRun=${chainConfigs.ethereum.dryRun})\n\n` +
+  `🟧 ARC: <b>${chainConfigs.arc.enabled ? 'ON' : 'OFF'}</b> (dryRun=${chainConfigs.arc.dryRun})\n`
   `Stage 1: multi-chain foundation loaded.\n` +
   `Robinhood minting still active as before.`
 );
