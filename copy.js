@@ -1050,81 +1050,81 @@ const receipt = await provider.getTransactionReceipt(sourceTxHash);
   let successCount = 0;
   const results = [];
 
-  for (const wallet of mintWallets) {
-    let walletSuccess = false;
-    let lastError = '';
+await Promise.all(mintWallets.map(async (wallet) => {
+  let walletSuccess = false;
+  let lastError = '';
 
-    for (const qty of quantityTries) {
-      let raw;
-      try {
-        raw = await buildDropMintTransaction(slug, wallet.address, qty);
-      } catch (err) {
-        lastError = cleanOpenSeaError(err.message || 'OpenSea build failed');
+  for (const qty of quantityTries) {
+    let raw;
+    try {
+      raw = await buildDropMintTransaction(slug, wallet.address, qty);
+    } catch (err) {
+      lastError = cleanOpenSeaError(err.message || 'OpenSea build failed');
+      continue;
+    }
+
+    const { to, data, value } = readMintTxFields(raw);
+    if (!to || !data) {
+      lastError = 'Invalid transaction data from OpenSea';
+      continue;
+    }
+
+    const valueWei = BigInt(value || '0');
+    const valueEth = Number(ethers.formatEther(valueWei));
+
+    if (activeMaxPrice !== null && valueEth > activeMaxPrice) {
+      lastError = `Price ${valueEth} ETH above limit`;
+      continue;
+    }
+
+    if (activeDryRun) {
+      results.push(`🧪 Dry run: would mint ${qty} with ${wallet.address.slice(0, 10)}... (${valueEth} ETH)`);
+      walletSuccess = true;
+      successCount++;
+      break;
+    }
+
+    // Real mint
+    try {
+      const provider = activeRpcPool.current();
+      const connectedSigner = wallet.signer.connect(provider);
+
+      const balance = await provider.getBalance(wallet.address);
+      const gasEstimate = await provider.estimateGas({
+        to, data, value: valueWei, from: wallet.address
+      });
+      const feeData = await provider.getFeeData();
+      const gasPrice = feeData.maxFeePerGas ?? feeData.gasPrice ?? 0n;
+      const totalCost = valueWei + gasEstimate * gasPrice;
+
+      if (balance < totalCost) {
+        lastError = `Insufficient balance (need ~${ethers.formatEther(totalCost)} ETH)`;
         continue;
       }
 
-      const { to, data, value } = readMintTxFields(raw);
-      if (!to || !data) {
-        lastError = 'Invalid transaction data from OpenSea';
-        continue;
-      }
+      const tx = await connectedSigner.sendTransaction({ to, data, value: valueWei });
+      const receipt = await tx.wait();
 
-      const valueWei = BigInt(value || '0');
-      const valueEth = Number(ethers.formatEther(valueWei));
-
-      if (activeMaxPrice !== null && valueEth > activeMaxPrice) {
-        lastError = `Price ${valueEth} ETH above limit`;
-        continue;
-      }
-
-      if (activeDryRun) {
-        results.push(`🧪 Dry run: would mint ${qty} with ${wallet.address.slice(0, 10)}... (${valueEth} ETH)`);
+      if (receipt.status === 1) {
+        results.push(`✅ ${wallet.address.slice(0, 10)}... minted ${qty} | Tx: ${tx.hash.slice(0, 12)}...`);
         walletSuccess = true;
         successCount++;
+        successfulMints.add(contractKey);
+        dailyStats.success += 1;
         break;
+      } else {
+        lastError = `Transaction reverted`;
       }
-
-      // Real mint
-      try {
-        const provider = activeRpcPool.current();
-        const connectedSigner = wallet.signer.connect(provider);
-
-        const balance = await provider.getBalance(wallet.address);
-        const gasEstimate = await provider.estimateGas({
-          to, data, value: valueWei, from: wallet.address
-        });
-        const feeData = await provider.getFeeData();
-        const gasPrice = feeData.maxFeePerGas ?? feeData.gasPrice ?? 0n;
-        const totalCost = valueWei + gasEstimate * gasPrice;
-
-        if (balance < totalCost) {
-          lastError = `Insufficient balance (need ~${ethers.formatEther(totalCost)} ETH)`;
-          continue;
-        }
-
-        const tx = await connectedSigner.sendTransaction({ to, data, value: valueWei });
-        const receipt = await tx.wait();
-
-        if (receipt.status === 1) {
-          results.push(`✅ ${wallet.address.slice(0, 10)}... minted ${qty} | Tx: ${tx.hash.slice(0, 12)}...`);
-          walletSuccess = true;
-          successCount++;
-          successfulMints.add(contractKey);
-          dailyStats.success += 1;
-          break;
-        } else {
-          lastError = `Transaction reverted`;
-        }
-      } catch (err) {
-        lastError = err.message || 'Send failed';
-        continue;
-      }
-    }
-
-    if (!walletSuccess) {
-      results.push(`❌ ${wallet.address.slice(0, 10)}... failed → ${lastError.slice(0, 80)}`);
+    } catch (err) {
+      lastError = cleanOpenSeaError(err.message || 'Send failed');
+      continue;
     }
   }
+
+  if (!walletSuccess) {
+    results.push(`❌ ${wallet.address.slice(0, 10)}... failed → ${lastError.slice(0, 80)}`);
+  }
+}));
 
   // Final summary message
   let summary =
