@@ -300,6 +300,27 @@ let isPaused = false;   // when true, bot detects but does not mint
 let isRhPaused = false;
 let isEthPaused = false;
 
+// ===== Stats + already-minted protection =====
+const successfulMints = new Set(); // contract addresses already successfully minted
+const dailyStats = {
+  detected: 0,
+  attempted: 0,
+  success: 0,
+  failed: 0,
+  skipped: 0,
+  startedAt: Date.now(),
+};
+
+function resetDailyStats() {
+  dailyStats.detected = 0;
+  dailyStats.attempted = 0;
+  dailyStats.success = 0;
+  dailyStats.failed = 0;
+  dailyStats.skipped = 0;
+  dailyStats.startedAt = Date.now();
+}
+// ===== End stats =====
+
 async function refreshWatchedWallets() {
   try {
     watchedWallets = await dbListWallets();
@@ -932,6 +953,22 @@ if (chainName === 'robinhood' && isRhPaused) {
     return;
   }
 
+  const contractKey = contractAddress.toLowerCase();
+
+  // If we already successfully minted this collection, skip
+  if (successfulMints.has(contractKey)) {
+    dailyStats.detected += 1;
+    dailyStats.skipped += 1;
+    await notify(
+      `⏭ <b>${chainLabel} skipped</b>\n` +
+      `Contract: <code>${escapeHtml(contractAddress)}</code>\n` +
+      `Already successfully minted this collection earlier.`
+    );
+    return;
+  }
+
+  dailyStats.detected += 1;  
+
   console.log(`\n[mint detected] wallet=${sourceWallet} contract=${contractAddress} source_tx=${sourceTxHash}`);
 
   // Detect quantity
@@ -1009,6 +1046,7 @@ const receipt = await provider.getTransactionReceipt(sourceTxHash);
     return;
   }
 
+  dailyStats.attempted += 1;
   let successCount = 0;
   const results = [];
 
@@ -1035,9 +1073,9 @@ const receipt = await provider.getTransactionReceipt(sourceTxHash);
       const valueEth = Number(ethers.formatEther(valueWei));
 
       if (activeMaxPrice !== null && valueEth > activeMaxPrice) {
-  lastError = `Price ${valueEth} ETH above limit`;
-  continue;
-}
+        lastError = `Price ${valueEth} ETH above limit`;
+        continue;
+      }
 
       if (activeDryRun) {
         results.push(`🧪 Dry run: would mint ${qty} with ${wallet.address.slice(0, 10)}... (${valueEth} ETH)`);
@@ -1071,6 +1109,8 @@ const receipt = await provider.getTransactionReceipt(sourceTxHash);
           results.push(`✅ ${wallet.address.slice(0, 10)}... minted ${qty} | Tx: ${tx.hash.slice(0, 12)}...`);
           walletSuccess = true;
           successCount++;
+          successfulMints.add(contractKey);
+          dailyStats.success += 1;
           break;
         } else {
           lastError = `Transaction reverted`;
@@ -1094,6 +1134,7 @@ const receipt = await provider.getTransactionReceipt(sourceTxHash);
   summary += results.join('\n');
 
   if (successCount === 0) {
+    dailyStats.failed += 1;
     summary += `\n\n⚠️ All OpenSea attempts failed. Trying direct mint fallback...`;
     await notify(summary);
     return attemptDirectMint(contractAddress, sourceWallet);
@@ -1264,6 +1305,20 @@ async function main() {
   console.log('[startup] starting Ethereum poll loop...');
   ethPollLoop();
 }
+
+  // Daily summary every 24 hours
+  setInterval(async () => {
+    const msg =
+      `📊 <b>Daily Summary</b>\n\n` +
+      `Detected: <b>${dailyStats.detected}</b>\n` +
+      `Attempted: <b>${dailyStats.attempted}</b>\n` +
+      `Success: <b>${dailyStats.success}</b>\n` +
+      `Failed: <b>${dailyStats.failed}</b>\n` +
+      `Skipped: <b>${dailyStats.skipped}</b>`;
+
+    await notify(msg);
+    resetDailyStats();
+  }, 24 * 60 * 60 * 1000); // 24 hours
 }
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
