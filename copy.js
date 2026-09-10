@@ -236,12 +236,30 @@ const chainConfigs = {
         ? 0
         : Number(process.env.ARC_MAX_PRICE_ETH),
     dryRun: (process.env.ARC_DRY_RUN || 'true').toLowerCase() !== 'false',
+  },
+    ink: {
+    name: 'ink',
+    enabled: (process.env.INK_ENABLED || 'false').toLowerCase() === 'true',
+    chainId: Number(process.env.INK_CHAIN_ID || 57073),
+    rpcUrls: (process.env.INK_RPC_URLS || '')
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean),
+    openseaSlug: process.env.INK_OPENSEA_SLUG || 'ink',
+    explorerApiBase: process.env.INK_EXPLORER_API_BASE || 'https://explorer.inkonchain.com/api',
+    explorerApiKey: process.env.INK_EXPLORER_API_KEY || '',
+    maxPriceEth:
+      process.env.INK_MAX_PRICE_ETH === undefined || String(process.env.INK_MAX_PRICE_ETH).trim() === ''
+        ? 0
+        : Number(process.env.INK_MAX_PRICE_ETH),
+    dryRun: (process.env.INK_DRY_RUN || 'true').toLowerCase() !== 'false',
   }
 };
 
 console.log('[chains] Robinhood enabled:', chainConfigs.robinhood.enabled, 'RPCs:', chainConfigs.robinhood.rpcUrls.length);
 console.log('[chains] Ethereum enabled:', chainConfigs.ethereum.enabled, 'RPCs:', chainConfigs.ethereum.rpcUrls.length);
 console.log('[chains] ARC enabled:', chainConfigs.arc.enabled, 'RPCs:', chainConfigs.arc.rpcUrls.length);
+console.log('[chains] Ink enabled:', chainConfigs.ink.enabled, 'RPCs:', chainConfigs.ink.rpcUrls.length);
 
 if (chainConfigs.ethereum.enabled && chainConfigs.ethereum.rpcUrls.length === 0) {
   console.warn('[chains] ETH_ENABLED=true but ETH_RPC_URLS is empty');
@@ -737,6 +755,16 @@ let ethLastCheckedBlock = null;
 const ethSeenTxHashes = new Set();
 // ===== End Ethereum RPC pool =====
 
+// ===== Ink RPC pool =====
+const inkRpcPool = chainConfigs.ink.enabled && chainConfigs.ink.rpcUrls.length > 0
+  ? new RpcPool(chainConfigs.ink.rpcUrls, chainConfigs.ink.chainId)
+  : null;
+
+let inkLastCheckedBlock = null;
+const inkSeenTxHashes = new Set();
+let isInkPaused = false;
+// ===== End Ink RPC pool =====
+
 // ---------------------------------------------------------------------------
 // OpenSea helpers
 // ---------------------------------------------------------------------------
@@ -933,15 +961,25 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet, chainName =
   }
 
     const chain = chainConfigs[chainName] || chainConfigs.robinhood;
-  const activeRpcPool = chainName === 'ethereum' ? ethRpcPool : rpcPool;
+    const activeRpcPool =
+    chainName === 'ethereum' ? ethRpcPool :
+    chainName === 'ink' ? inkRpcPool :
+    rpcPool;
   const activeDryRun = chain.dryRun;
   const activeMaxPrice = chain.maxPriceEth;
   const activeOpenseaSlug = chain.openseaSlug;
-  const chainLabel = chainName === 'ethereum' ? '🟦 ETH' : '🟢 RH';
+    const chainLabel =
+    chainName === 'ethereum' ? '🟦 ETH' :
+    chainName === 'ink' ? '💜 INK' :
+    '🟢 RH';
 
   if (chainName === 'ethereum' && isEthPaused) {
   await notify(`⏸ ETH is paused. Skipping.`);
   return;
+}
+  if (chainName === 'ink' && isInkPaused) {
+    await notify(`⏸ Ink is paused. Skipping.`);
+    return;
 }
 if (chainName === 'robinhood' && isRhPaused) {
   await notify(`⏸ Robinhood is paused. Skipping.`);
@@ -1270,6 +1308,71 @@ async function ethPollLoop() {
 }
 // ===== End Ethereum watcher =====
 
+// ===== Ink watcher =====
+async function getInkLatestBlock() {
+  if (!inkRpcPool) throw new Error('Ink RPC pool not initialized');
+  return inkRpcPool.withFailover((p) => p.getBlockNumber());
+}
+
+async function findInkMintsInRange(fromBlock, toBlock) {
+  const paddedNull = ethers.zeroPadValue(NULL_ADDRESS, 32);
+  const logs = await inkRpcPool.withFailover((p) =>
+    p.getLogs({
+      fromBlock,
+      toBlock,
+      topics: [ERC721_TRANSFER_TOPIC, paddedNull],
+    })
+  );
+
+  const mints = [];
+  for (const log of logs) {
+    if (log.topics.length < 3) continue;
+    const toAddress = ethers.getAddress('0x' + log.topics[2].slice(26)).toLowerCase();
+    if (!watchedWallets.includes(toAddress)) continue;
+    if (inkSeenTxHashes.has(log.transactionHash)) continue;
+    inkSeenTxHashes.add(log.transactionHash);
+    mints.push({
+      contractAddress: log.address,
+      txHash: log.transactionHash,
+      wallet: toAddress,
+    });
+  }
+  return mints;
+}
+
+async function inkPollLoop() {
+  if (!chainConfigs.ink.enabled || !inkRpcPool) return;
+
+  try {
+    const latest = await getInkLatestBlock();
+    const safeLatest = Math.max(latest - 2, 0);
+
+    if (inkLastCheckedBlock === null) {
+      inkLastCheckedBlock = safeLatest;
+      console.log(`[ink-init] starting from block ${inkLastCheckedBlock}`);
+    }
+
+    if (safeLatest > inkLastCheckedBlock) {
+      const MAX_BLOCKS_PER_SCAN = 200;
+      const toBlock = Math.min(inkLastCheckedBlock + MAX_BLOCKS_PER_SCAN, safeLatest);
+
+      console.log(`[ink-poll] scanning blocks ${inkLastCheckedBlock + 1} → ${toBlock}`);
+
+      const mints = await findInkMintsInRange(inkLastCheckedBlock + 1, toBlock);
+      for (const mint of mints) {
+        await copyMint(mint.contractAddress, mint.txHash, mint.wallet, 'ink');
+      }
+
+      inkLastCheckedBlock = toBlock;
+    }
+  } catch (err) {
+    console.error(`[ink-poll] ${err.message}`);
+  }
+
+  setTimeout(inkPollLoop, POLL_INTERVAL_MS);
+}
+// ===== End Ink watcher =====
+
 // ---------------------------------------------------------------------------
 // Startup
 // ---------------------------------------------------------------------------
@@ -1294,6 +1397,7 @@ async function main() {
   `Poll: <b>${POLL_INTERVAL_MS}ms</b>\n\n` +
   `🟢 Robinhood: <b>${chainConfigs.robinhood.enabled ? 'ON' : 'OFF'}</b> (dryRun=${chainConfigs.robinhood.dryRun})\n` +
   `🟦 Ethereum: <b>${chainConfigs.ethereum.enabled ? 'ON' : 'OFF'}</b> (dryRun=${chainConfigs.ethereum.dryRun})\n` +
+  `💜 Ink: <b>${chainConfigs.ink.enabled ? 'ON' : 'OFF'}</b> (dryRun=${chainConfigs.ink.dryRun})\n` +
   `⬜ ARC: <b>${chainConfigs.arc.enabled ? 'ON' : 'OFF'}</b> (dryRun=${chainConfigs.arc.dryRun})\n\n` +
   `Stage 1: multi-chain foundation loaded.\n` +
   `Robinhood minting still active as before.`
@@ -1305,6 +1409,10 @@ async function main() {
   console.log('[startup] starting Ethereum poll loop...');
   ethPollLoop();
 }
+  if (chainConfigs.ink.enabled && inkRpcPool) {
+    console.log('[startup] starting Ink poll loop...');
+    inkPollLoop();
+  }
 
   // Daily summary every 24 hours
   setInterval(async () => {
