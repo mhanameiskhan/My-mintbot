@@ -373,8 +373,8 @@ const mainMenu = Markup.keyboard([
   ['⏸ Pause RH', '▶️ Resume RH'],
   ['⏸ Pause ETH', '▶️ Resume ETH'],
   ['⏸ Pause Ink', '▶️ Resume Ink'],
+  ['🎯 Sponsor ON', '🎯 Sponsor OFF'],
   ['⏸ Pause All', '▶️ Resume All'],
-  ['🎁 Sponsor ON', '🎁 Sponsor OFF'],   // ← NEW
   ['ℹ️ Help']
 ]).resize();
 
@@ -409,14 +409,10 @@ bot.hears('📊 Status', async (ctx) => {
   const message =
     `📊 <b>Bot Status</b>\n\n` +
     `Global: <b>${globalState}</b>\n` +
+    `Sponsor mode: <b>${isSponsorMode ? '🎯 ON' : 'OFF'}</b>\n` +
     `Poll: <b>${POLL_INTERVAL_MS}ms</b>\n` +
     `Watched wallets: <b>${watchedWallets.length}</b>\n` +
     `Minting wallets: <b>${mintingWalletsCount}</b>\n` +
-    `🎁 Sponsored: <b>${SPONSOR_ENABLED ? 'ON' : 'OFF'}</b>\n` +
-  (SPONSOR_ENABLED
-    ? `Sponsor: <code>${escapeHtml(sponsorWallet?.address?.slice(0, 12) || '?')}...</code>\n` +
-      `Receiver: <code>${escapeHtml(MAIN_RECEIVER_ADDRESS.slice(0, 12))}...</code>\n`
-    : '') +
     `${mintingList}\n\n` +
     `🟢 <b>Robinhood</b>\n` +
     `State: <b>${rhState}</b>\n` +
@@ -553,6 +549,24 @@ bot.hears('▶️ Resume All', async (ctx) => {
   await ctx.reply('▶️ All minting resumed');
 });
 
+bot.hears('🎯 Sponsor ON', async (ctx) => {
+  if (!isAuthorizedChat(ctx)) return;
+  if (!sponsorWallet) {
+    return ctx.reply('❌ No sponsor wallet configured in .env');
+  }
+  isSponsorMode = true;
+  await ctx.reply(
+    '🎯 <b>Sponsor mode ON</b>\nSponsor pays gas + mint price.\nNFTs will go to your normal wallets.',
+    { parse_mode: 'HTML' }
+  );
+});
+
+bot.hears('🎯 Sponsor OFF', async (ctx) => {
+  if (!isAuthorizedChat(ctx)) return;
+  isSponsorMode = false;
+  await ctx.reply('🎯 Sponsor mode OFF\nEach wallet pays its own gas + mint price again.');
+});
+
 bot.hears('💰 RH Balances', async (ctx) => {
   if (!isAuthorizedChat(ctx)) return;
   try {
@@ -606,30 +620,6 @@ bot.hears('💜 Ink Balances', async (ctx) => {
   } catch (err) {
     await ctx.reply(`❌ Ink balances failed: ${err.message}`);
   }
-});
-
-bot.hears('🎁 Sponsor ON', async (ctx) => {
-  if (!isAuthorizedChat(ctx)) return;
-  if (!sponsorWallet) {
-    return ctx.reply('❌ Sponsor wallet not configured (missing SPONSOR_PRIVATE_KEY)');
-  }
-  if (!MAIN_RECEIVER_ADDRESS || !ethers.isAddress(MAIN_RECEIVER_ADDRESS)) {
-    return ctx.reply('❌ MAIN_RECEIVER_ADDRESS is missing or invalid');
-  }
-  SPONSOR_ENABLED = true;
-  await ctx.reply(
-    `🎁 <b>Sponsored mode ON</b>\n` +
-    `Sponsor: <code>${escapeHtml(sponsorWallet.address)}</code>\n` +
-    `Receiver: <code>${escapeHtml(MAIN_RECEIVER_ADDRESS)}</code>\n` +
-    `Sponsor pays gas + mint price.`,
-    { parse_mode: 'HTML' }
-  );
-});
-
-bot.hears('🎁 Sponsor OFF', async (ctx) => {
-  if (!isAuthorizedChat(ctx)) return;
-  SPONSOR_ENABLED = false;
-  await ctx.reply('🎁 Sponsored mode OFF — back to normal multi-wallet minting');
 });
 // ===== END BUTTON MENU =====
 
@@ -716,14 +706,10 @@ bot.command('status', async (ctx) => {
   const message =
     `📊 <b>Bot Status</b>\n\n` +
     `Global: <b>${globalState}</b>\n` +
+    `Sponsor mode: <b>${isSponsorMode ? '🎯 ON' : 'OFF'}</b>\n` +
     `Poll: <b>${POLL_INTERVAL_MS}ms</b>\n` +
     `Watched wallets: <b>${watchedWallets.length}</b>\n` +
     `Minting wallets: <b>${mintingWalletsCount}</b>\n` +
-    `🎁 Sponsored: <b>${SPONSOR_ENABLED ? 'ON' : 'OFF'}</b>\n` +
-  (SPONSOR_ENABLED
-    ? `Sponsor: <code>${escapeHtml(sponsorWallet?.address?.slice(0, 12) || '?')}...</code>\n` +
-      `Receiver: <code>${escapeHtml(MAIN_RECEIVER_ADDRESS.slice(0, 12))}...</code>\n`
-    : '') +
     `${mintingList}\n\n` +
     `🟢 <b>Robinhood</b>\n` +
     `State: <b>${rhState}</b>\n` +
@@ -823,17 +809,13 @@ if (!DRY_RUN) {
   console.log(`[startup] Loaded ${wallets.length} minting wallet(s)`);
 }
 
-// Keep old single signer for compatibility with other parts of the code
-const signer = wallets.length > 0 ? wallets[0].signer.connect(rpcPool.current()) : null;
-const WALLET_ADDRESS_EFFECTIVE = wallets.length > 0 ? wallets[0].address : WALLET_ADDRESS;
+// ===== Sponsor wallet (Option A) =====
+let sponsorWallet = null;
+const SPONSOR_ENABLED_ENV = (process.env.SPONSOR_ENABLED || 'false').toLowerCase() === 'true';
+let isSponsorMode = SPONSOR_ENABLED_ENV;
 
-// ===== Sponsored Mint =====
-let SPONSOR_ENABLED = (process.env.SPONSOR_ENABLED || 'false').toLowerCase() === 'true';
 const SPONSOR_PRIVATE_KEY_RAW = (process.env.SPONSOR_PRIVATE_KEY || '').trim();
 const SPONSOR_ADDRESS = (process.env.SPONSOR_ADDRESS || '').toLowerCase();
-const MAIN_RECEIVER_ADDRESS = (process.env.MAIN_RECEIVER_ADDRESS || '').toLowerCase();
-
-let sponsorWallet = null; // { address, signer }
 
 if (SPONSOR_PRIVATE_KEY_RAW) {
   let key = SPONSOR_PRIVATE_KEY_RAW.startsWith('0x')
@@ -844,28 +826,26 @@ if (SPONSOR_PRIVATE_KEY_RAW) {
     throw new Error('SPONSOR_PRIVATE_KEY is not a valid 32-byte hex key');
   }
 
-  const w = new ethers.Wallet(key);
-  if (SPONSOR_ADDRESS && w.address.toLowerCase() !== SPONSOR_ADDRESS) {
+  const wallet = new ethers.Wallet(key);
+
+  if (SPONSOR_ADDRESS && wallet.address.toLowerCase() !== SPONSOR_ADDRESS) {
     throw new Error('SPONSOR_PRIVATE_KEY does not match SPONSOR_ADDRESS');
   }
 
   sponsorWallet = {
-    address: w.address.toLowerCase(),
-    signer: w,
+    address: wallet.address.toLowerCase(),
+    signer: wallet
   };
-  console.log(`[startup] Sponsor wallet loaded: ${sponsorWallet.address}`);
-}
 
-if (SPONSOR_ENABLED) {
-  if (!sponsorWallet) {
-    throw new Error('SPONSOR_ENABLED=true but SPONSOR_PRIVATE_KEY is missing');
-  }
-  if (!MAIN_RECEIVER_ADDRESS || !ethers.isAddress(MAIN_RECEIVER_ADDRESS)) {
-    throw new Error('SPONSOR_ENABLED=true requires a valid MAIN_RECEIVER_ADDRESS');
-  }
-  console.log(`[startup] Sponsored mode ON → NFTs go to ${MAIN_RECEIVER_ADDRESS}`);
+  console.log(`[startup] Sponsor wallet loaded: ${sponsorWallet.address.slice(0, 10)}...`);
+} else {
+  console.log('[startup] No sponsor wallet configured');
 }
-// ===== End Sponsored Mint =====
+// ===== End Sponsor wallet =====
+
+// Keep old single signer for compatibility with other parts of the code
+const signer = wallets.length > 0 ? wallets[0].signer.connect(rpcPool.current()) : null;
+const WALLET_ADDRESS_EFFECTIVE = wallets.length > 0 ? wallets[0].address : WALLET_ADDRESS;
 
 // ===== Ethereum RPC pool (Stage 2) =====
 const ethRpcPool = chainConfigs.ethereum.enabled && chainConfigs.ethereum.rpcUrls.length > 0
@@ -973,24 +953,6 @@ if (activeDryRun) {
     return;
   }
 
-    // ---------- Sponsored mode for direct mint ----------
-  const useSponsor = SPONSOR_ENABLED && sponsorWallet && MAIN_RECEIVER_ADDRESS;
-
-  const mintWallets = useSponsor
-    ? [{ address: MAIN_RECEIVER_ADDRESS, signer: sponsorWallet.signer }]
-    : (wallets.length > 0
-        ? wallets
-        : [{ address: WALLET_ADDRESS, signer: signer }]);
-
-  if (mintWallets.length === 0) {
-    await notify(`❌ No minting wallet available for direct mint`);
-    return;
-  }
-
-  if (useSponsor) {
-    console.log(`[sponsor-direct] mode active → receiver=${MAIN_RECEIVER_ADDRESS}  payer=${sponsorWallet.address}`);
-  }
-
   if (!signer && wallets.length === 0) {
     await notify(`❌ No minting wallet available for direct mint`);
     return;
@@ -1001,6 +963,9 @@ if (activeDryRun) {
   return;
   }
   const provider = activeRpcPool.current();
+  const mintWallets = wallets.length > 0
+    ? wallets
+    : [{ address: WALLET_ADDRESS, signer: signer }];
 
   const EXTRA_MINT_ABIS = [
     'function mint() public payable',
@@ -1061,10 +1026,7 @@ if (activeDryRun) {
           const tx = await attempt();
           const receipt = await tx.wait();
           if (receipt.status === 1) {
-            results.push(
-              `✅ ${useSponsor ? 'Sponsor' : wallet.address.slice(0, 10) + '...'} → ` +
-              `${wallet.address.slice(0, 10)}... tx ${tx.hash.slice(0, 12)}...`
-            );
+            results.push(`✅ ${wallet.address.slice(0, 10)}... tx ${tx.hash.slice(0, 12)}...`);
             walletSuccess = true;
             anySuccess = true;
             break;
@@ -1235,31 +1197,114 @@ const receipt = await provider.getTransactionReceipt(sourceTxHash);
     `Wallets: <b>${wallets.length || 1}</b>`
   );
 
-  // ---------- Sponsored mode decision ----------
-  const useSponsor = SPONSOR_ENABLED && sponsorWallet && MAIN_RECEIVER_ADDRESS;
+const targetWallets = activeDryRun
+  ? [{ address: (wallets[0]?.address || WALLET_ADDRESS || ethers.ZeroAddress) }]
+  : wallets;
 
-  const mintWallets = activeDryRun
-    ? [{ address: useSponsor ? MAIN_RECEIVER_ADDRESS : (wallets[0]?.address || WALLET_ADDRESS || ethers.ZeroAddress) }]
-    : useSponsor
-      ? [{ address: MAIN_RECEIVER_ADDRESS, signer: sponsorWallet.signer }]
-      : wallets;
+if (targetWallets.length === 0) {
+  await notify(`❌ No minting wallets configured`);
+  return;
+}
 
-  if (mintWallets.length === 0) {
-    await notify(`❌ No minting wallets configured`);
-    return;
-  }
+const useSponsor = isSponsorMode && sponsorWallet && !activeDryRun;
 
-  if (useSponsor) {
-    console.log(`[sponsor] mode active → minter=${MAIN_RECEIVER_ADDRESS}  payer=${sponsorWallet.address}`);
-  }
+if (useSponsor) {
+  console.log(`[sponsor] Using sponsor ${sponsorWallet.address} for ${targetWallets.length} wallets`);
+}
 
-  dailyStats.attempted += 1;
-  let successCount = 0;
-  const results = [];
+dailyStats.attempted += 1;
+let successCount = 0;
+const results = [];
 
-  await Promise.all(mintWallets.map(async (wallet) => {
+const mintOne = async (targetWallet) => {
   let walletSuccess = false;
   let lastError = '';
+
+  for (const qty of quantityTries) {
+    let raw;
+    try {
+      raw = await buildDropMintTransaction(slug, targetWallet.address, qty);
+    } catch (err) {
+      lastError = cleanOpenSeaError(err.message || 'OpenSea build failed');
+      continue;
+    }
+
+    const { to, data, value } = readMintTxFields(raw);
+    if (!to || !data) {
+      lastError = 'Invalid transaction data from OpenSea';
+      continue;
+    }
+
+    const valueWei = BigInt(value || '0');
+    const valueEth = Number(ethers.formatEther(valueWei));
+
+    if (activeMaxPrice !== null && valueEth > activeMaxPrice) {
+      lastError = `Price ${valueEth} ETH above limit`;
+      continue;
+    }
+
+    if (activeDryRun) {
+      results.push(`🧪 Dry run: would mint ${qty} → ${targetWallet.address.slice(0, 10)}... (${valueEth} ETH)`);
+      walletSuccess = true;
+      successCount++;
+      break;
+    }
+
+    const payer = useSponsor ? sponsorWallet : targetWallet;
+    const provider = activeRpcPool.current();
+    const connectedSigner = payer.signer.connect(provider);
+
+    try {
+      const balance = await provider.getBalance(payer.address);
+      const gasEstimate = await provider.estimateGas({
+        to, data, value: valueWei, from: payer.address
+      });
+      const feeData = await provider.getFeeData();
+      const gasPrice = feeData.maxFeePerGas ?? feeData.gasPrice ?? 0n;
+      const totalCost = valueWei + gasEstimate * gasPrice;
+
+      if (balance < totalCost) {
+        lastError = `Insufficient balance on ${useSponsor ? 'sponsor' : 'wallet'} (need ~${ethers.formatEther(totalCost)} ETH)`;
+        continue;
+      }
+
+      const tx = await connectedSigner.sendTransaction({ to, data, value: valueWei });
+      const receipt = await tx.wait();
+
+      if (receipt.status === 1) {
+        results.push(
+          `✅ ${targetWallet.address.slice(0, 10)}... received ${qty}` +
+          (useSponsor ? ` (paid by sponsor)` : '') +
+          ` | Tx: ${tx.hash.slice(0, 12)}...`
+        );
+        walletSuccess = true;
+        successCount++;
+        successfulMints.add(contractKey);
+        dailyStats.success += 1;
+        break;
+      } else {
+        lastError = `Transaction reverted`;
+      }
+    } catch (err) {
+      lastError = cleanOpenSeaError(err.message || 'Send failed');
+      continue;
+    }
+  }
+
+  if (!walletSuccess) {
+    results.push(`❌ ${targetWallet.address.slice(0, 10)}... failed → ${lastError.slice(0, 80)}`);
+  }
+};
+
+if (useSponsor) {
+  // one by one (safer)
+  for (const w of targetWallets) {
+    await mintOne(w);
+  }
+} else {
+  // normal parallel mode
+  await Promise.all(targetWallets.map(w => mintOne(w)));
+}
 
   for (const qty of quantityTries) {
     let raw;
@@ -1296,19 +1341,16 @@ const receipt = await provider.getTransactionReceipt(sourceTxHash);
       const provider = activeRpcPool.current();
       const connectedSigner = wallet.signer.connect(provider);
 
-      // When sponsored, check the sponsor's balance
-      const payerAddress = useSponsor ? sponsorWallet.address : wallet.address;
-      const balance = await provider.getBalance(payerAddress);
-
+      const balance = await provider.getBalance(wallet.address);
       const gasEstimate = await provider.estimateGas({
-        to, data, value: valueWei, from: payerAddress
+        to, data, value: valueWei, from: wallet.address
       });
       const feeData = await provider.getFeeData();
       const gasPrice = feeData.maxFeePerGas ?? feeData.gasPrice ?? 0n;
       const totalCost = valueWei + gasEstimate * gasPrice;
 
       if (balance < totalCost) {
-        lastError = `Insufficient balance on ${useSponsor ? 'sponsor' : 'wallet'} (need ~${ethers.formatEther(totalCost)} ETH)`;
+        lastError = `Insufficient balance (need ~${ethers.formatEther(totalCost)} ETH)`;
         continue;
       }
 
@@ -1316,11 +1358,8 @@ const receipt = await provider.getTransactionReceipt(sourceTxHash);
       const receipt = await tx.wait();
 
       if (receipt.status === 1) {
-        results.push(
-          `✅ ${useSponsor ? 'Sponsor' : wallet.address.slice(0, 10) + '...'} minted ${qty} ` +
-          `→ ${wallet.address.slice(0, 10)}... | Tx: ${tx.hash.slice(0, 12)}...`
-        );
-                walletSuccess = true;
+        results.push(`✅ ${wallet.address.slice(0, 10)}... minted ${qty} | Tx: ${tx.hash.slice(0, 12)}...`);
+        walletSuccess = true;
         successCount++;
         successfulMints.add(contractKey);
         dailyStats.success += 1;
