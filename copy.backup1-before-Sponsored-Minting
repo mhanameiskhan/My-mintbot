@@ -1060,15 +1060,16 @@ if (activeDryRun) {
 function cleanOpenSeaError(msg) {
   const text = String(msg || '');
 
-  // Keep short friendly labels for common cases
   if (text.includes('Drop not foun')) return 'Drop not found on OpenSea';
+  if (text.includes('Insufficient b')) return 'Insufficient balance/allocation';
   if (text.includes('Wallet is not')) return 'Wallet not eligible';
+  if (text.includes('422')) return 'OpenSea rejected mint (422)';
   if (text.includes('404')) return 'OpenSea drop not found (404)';
 
-  // For real debugging: show more of the original error
   return text
     .replace(/\s+/g, ' ')
-    .slice(0, 300);
+    .replace(/\{[^}]*\}/g, '')
+    .slice(0, 80);
 }
 
 // ---------------------------------------------------------------------------
@@ -1196,7 +1197,7 @@ const receipt = await provider.getTransactionReceipt(sourceTxHash);
     `Wallets: <b>${wallets.length || 1}</b>`
   );
 
-  const targetWallets = activeDryRun
+const targetWallets = activeDryRun
   ? [{ address: (wallets[0]?.address || WALLET_ADDRESS || ethers.ZeroAddress) }]
   : wallets;
 
@@ -1224,10 +1225,9 @@ const mintOne = async (targetWallet) => {
     try {
       raw = await buildDropMintTransaction(slug, targetWallet.address, qty);
     } catch (err) {
-  console.error('[opensea-error]', err.message || err);
-  lastError = cleanOpenSeaError(err.message || 'OpenSea build failed');
-  continue;
-}
+      lastError = cleanOpenSeaError(err.message || 'OpenSea build failed');
+      continue;
+    }
 
     const { to, data, value } = readMintTxFields(raw);
     if (!to || !data) {
@@ -1286,7 +1286,6 @@ const mintOne = async (targetWallet) => {
         lastError = `Transaction reverted`;
       }
     } catch (err) {
-      console.error('[mint-send-error]', err.message || err);
       lastError = cleanOpenSeaError(err.message || 'Send failed');
       continue;
     }
@@ -1307,10 +1306,82 @@ if (useSponsor) {
   await Promise.all(targetWallets.map(w => mintOne(w)));
 }
 
+  for (const qty of quantityTries) {
+    let raw;
+    try {
+      raw = await buildDropMintTransaction(slug, wallet.address, qty);
+    } catch (err) {
+      lastError = cleanOpenSeaError(err.message || 'OpenSea build failed');
+      continue;
+    }
+
+    const { to, data, value } = readMintTxFields(raw);
+    if (!to || !data) {
+      lastError = 'Invalid transaction data from OpenSea';
+      continue;
+    }
+
+    const valueWei = BigInt(value || '0');
+    const valueEth = Number(ethers.formatEther(valueWei));
+
+    if (activeMaxPrice !== null && valueEth > activeMaxPrice) {
+      lastError = `Price ${valueEth} ETH above limit`;
+      continue;
+    }
+
+    if (activeDryRun) {
+      results.push(`🧪 Dry run: would mint ${qty} with ${wallet.address.slice(0, 10)}... (${valueEth} ETH)`);
+      walletSuccess = true;
+      successCount++;
+      break;
+    }
+
+    // Real mint
+    try {
+      const provider = activeRpcPool.current();
+      const connectedSigner = wallet.signer.connect(provider);
+
+      const balance = await provider.getBalance(wallet.address);
+      const gasEstimate = await provider.estimateGas({
+        to, data, value: valueWei, from: wallet.address
+      });
+      const feeData = await provider.getFeeData();
+      const gasPrice = feeData.maxFeePerGas ?? feeData.gasPrice ?? 0n;
+      const totalCost = valueWei + gasEstimate * gasPrice;
+
+      if (balance < totalCost) {
+        lastError = `Insufficient balance (need ~${ethers.formatEther(totalCost)} ETH)`;
+        continue;
+      }
+
+      const tx = await connectedSigner.sendTransaction({ to, data, value: valueWei });
+      const receipt = await tx.wait();
+
+      if (receipt.status === 1) {
+        results.push(`✅ ${wallet.address.slice(0, 10)}... minted ${qty} | Tx: ${tx.hash.slice(0, 12)}...`);
+        walletSuccess = true;
+        successCount++;
+        successfulMints.add(contractKey);
+        dailyStats.success += 1;
+        break;
+      } else {
+        lastError = `Transaction reverted`;
+      }
+    } catch (err) {
+      lastError = cleanOpenSeaError(err.message || 'Send failed');
+      continue;
+    }
+  }
+
+  if (!walletSuccess) {
+    results.push(`❌ ${wallet.address.slice(0, 10)}... failed → ${lastError.slice(0, 80)}`);
+  }
+}));
+
   // Final summary message
   let summary =
     `📋 <b>Result for</b> <code>${escapeHtml(slug)}</code>\n` +
-    `Success: <b>${successCount}/${targetWallets.length}</b> wallets\n\n`;
+    `Success: <b>${successCount}/${mintWallets.length}</b> wallets\n\n`;
 
   summary += results.join('\n');
 
