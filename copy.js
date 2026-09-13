@@ -955,8 +955,8 @@ if (!DRY_RUN) {
 
 // ===== Sponsor wallet (Option A) =====
 let sponsorWallet = null;
-const SPONSOR_ENABLED_ENV = (process.env.SPONSOR_ENABLED || 'false').toLowerCase() === 'true';
-let isSponsorMode = SPONSOR_ENABLED_ENV;
+// Always start with Sponsor OFF on every restart / deploy
+let isSponsorMode = false;
 
 const SPONSOR_PRIVATE_KEY_RAW = (process.env.SPONSOR_PRIVATE_KEY || '').trim();
 const SPONSOR_ADDRESS = (process.env.SPONSOR_ADDRESS || '').toLowerCase();
@@ -1701,8 +1701,22 @@ async function main() {
     inkPollLoop();
   }
 
-  // Daily summary every 24 hours
-  setInterval(async () => {
+  // Daily summary at 20:00 UTC every day
+  function msUntilNext8pmUTC() {
+    const now = new Date();
+    const next = new Date(Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate(),
+      20, 0, 0, 0 // 20:00 UTC = 8:00 PM UTC
+    ));
+    if (next <= now) {
+      next.setUTCDate(next.getUTCDate() + 1);
+    }
+    return next.getTime() - now.getTime();
+  }
+
+  async function sendDailySummary() {
     const msg =
       `📊 <b>Daily Summary</b>\n\n` +
       `Detected: <b>${dailyStats.detected}</b>\n` +
@@ -1713,7 +1727,18 @@ async function main() {
 
     await notify(msg);
     resetDailyStats();
-  }, 24 * 60 * 60 * 1000); // 24 hours
+  }
+
+  function scheduleDailySummary() {
+    const delay = msUntilNext8pmUTC();
+    console.log(`[startup] Next daily summary in ${Math.round(delay / 60000)} minutes (20:00 UTC)`);
+    setTimeout(async () => {
+      await sendDailySummary();
+      setInterval(sendDailySummary, 24 * 60 * 60 * 1000);
+    }, delay);
+  }
+
+  scheduleDailySummary();
 }
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
