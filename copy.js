@@ -318,6 +318,7 @@ let isPaused = false;   // when true, bot detects but does not mint
 let isRhPaused = false;
 let isEthPaused = false;
 let isInkPaused = false;
+let pendingFundGas = false; // waiting for user to type the amount
 
 // ===== Stats + already-minted protection =====
 const successfulMints = new Set(); // contract addresses already successfully minted
@@ -366,6 +367,70 @@ async function notify(text) {
   }
 }
 
+async function runFundGas(ctx, amountStr) {
+  try {
+    if (!sponsorWallet) {
+      return ctx.reply('❌ No sponsor/funder wallet configured.');
+    }
+
+    if (!wallets || wallets.length === 0) {
+      return ctx.reply('❌ No minting wallets loaded.');
+    }
+
+    let amountEth;
+    try {
+      amountEth = Number(amountStr);
+      if (!Number.isFinite(amountEth) || amountEth <= 0) throw new Error('bad amount');
+    } catch {
+      return ctx.reply('❌ Invalid amount. Example: 0.002');
+    }
+
+    const amountWei = ethers.parseEther(String(amountEth));
+    const totalNeeded = amountWei * BigInt(wallets.length);
+
+    // First version: fund on Robinhood
+    const provider = rpcPool.current();
+    const funder = sponsorWallet.signer.connect(provider);
+
+    const balance = await provider.getBalance(sponsorWallet.address);
+    if (balance < totalNeeded) {
+      return ctx.reply(
+        `❌ Funder balance too low.\n` +
+        `Need at least ~${ethers.formatEther(totalNeeded)} ETH for transfers (plus gas).\n` +
+        `Funder balance: ${ethers.formatEther(balance)} ETH`
+      );
+    }
+
+    await ctx.reply(
+      `⛽ Sending <b>${amountEth}</b> ETH to <b>${wallets.length}</b> wallets...\n` +
+      `From: <code>${escapeHtml(sponsorWallet.address.slice(0, 12))}...</code>`,
+      { parse_mode: 'HTML' }
+    );
+
+    const results = [];
+
+    for (const w of wallets) {
+      try {
+        const tx = await funder.sendTransaction({
+          to: w.address,
+          value: amountWei,
+        });
+        await tx.wait();
+        results.push(`✅ ${w.address.slice(0, 10)}... ${amountEth} ETH | ${tx.hash.slice(0, 12)}...`);
+      } catch (err) {
+        results.push(`❌ ${w.address.slice(0, 10)}... ${(err.message || 'failed').slice(0, 80)}`);
+      }
+    }
+
+    await ctx.reply(
+      `⛽ <b>Fund Gas result</b>\n\n` + results.join('\n'),
+      { parse_mode: 'HTML' }
+    );
+  } catch (err) {
+    await ctx.reply(`❌ Fund gas failed: ${err.message}`);
+  }
+}
+
 // ===== BUTTON MENU =====
 const mainMenu = Markup.keyboard([
   ['📊 Status', '👛 Wallets'],
@@ -374,6 +439,7 @@ const mainMenu = Markup.keyboard([
   ['⏸ Pause ETH', '▶️ Resume ETH'],
   ['⏸ Pause Ink', '▶️ Resume Ink'],
   ['🎯 Sponsor ON', '🎯 Sponsor OFF'],
+  ['⛽ Fund Gas', '📦 Collect NFTs'],
   ['⏸ Pause All', '▶️ Resume All'],
   ['ℹ️ Help']
 ]).resize();
@@ -567,6 +633,28 @@ bot.hears('🎯 Sponsor OFF', async (ctx) => {
   await ctx.reply('🎯 Sponsor mode OFF\nEach wallet pays its own gas + mint price again.');
 });
 
+bot.hears('⛽ Fund Gas', async (ctx) => {
+  if (!isAuthorizedChat(ctx)) return;
+
+  if (!sponsorWallet) {
+    return ctx.reply('❌ No sponsor/funder wallet configured.');
+  }
+
+  pendingFundGas = true;
+  await ctx.reply(
+    '⛽ <b>Fund Gas</b>\n\n' +
+    'Send the amount of ETH to give <b>each</b> minting wallet.\n\n' +
+    'Example: <code>0.002</code>\n\n' +
+    'Or type <code>cancel</code> to abort.',
+    { parse_mode: 'HTML' }
+  );
+});
+
+bot.hears('📦 Collect NFTs', async (ctx) => {
+  if (!isAuthorizedChat(ctx)) return;
+  await ctx.reply('📦 Collect NFTs is not ready yet. Gas funding first.');
+});
+
 bot.hears('💰 RH Balances', async (ctx) => {
   if (!isAuthorizedChat(ctx)) return;
   try {
@@ -621,6 +709,40 @@ bot.hears('💜 Ink Balances', async (ctx) => {
     await ctx.reply(`❌ Ink balances failed: ${err.message}`);
   }
 });
+
+bot.on('text', async (ctx) => {
+  if (!isAuthorizedChat(ctx)) return;
+  if (!pendingFundGas) return;
+
+  const text = (ctx.message.text || '').trim();
+
+  // ignore commands and menu buttons
+  if (
+    text.startsWith('/') ||
+    text.startsWith('⛽') ||
+    text.startsWith('📦') ||
+    text.startsWith('📊') ||
+    text.startsWith('🎯') ||
+    text.startsWith('⏸') ||
+    text.startsWith('▶️') ||
+    text.startsWith('💰') ||
+    text.startsWith('💎') ||
+    text.startsWith('💜') ||
+    text.startsWith('👛') ||
+    text.startsWith('ℹ️')
+  ) {
+    return;
+  }
+
+  if (text.toLowerCase() === 'cancel') {
+    pendingFundGas = false;
+    return ctx.reply('Cancelled.');
+  }
+
+  pendingFundGas = false;
+  await runFundGas(ctx, text);
+});
+
 // ===== END BUTTON MENU =====
 
 bot.command('help', (ctx) => {
@@ -730,6 +852,28 @@ bot.command('status', async (ctx) => {
 
   await ctx.reply(message, { parse_mode: 'HTML' });
 });
+
+bot.command('fundgas', async (ctx) => {
+  if (!isAuthorizedChat(ctx)) return;
+
+  if (!sponsorWallet) {
+    return ctx.reply('❌ No sponsor/funder wallet configured.');
+  }
+
+  const parts = (ctx.message.text || '').trim().split(/\s+/);
+  const amountStr = parts[1];
+
+  if (!amountStr) {
+    pendingFundGas = true;
+    return ctx.reply(
+      'Usage: <code>/fundgas 0.002</code>\n\nOr send the amount now.',
+      { parse_mode: 'HTML' }
+    );
+  }
+
+  await runFundGas(ctx, amountStr);
+});
+
 // ---------------------------------------------------------------------------
 // Multi-RPC pool with failover
 // ---------------------------------------------------------------------------
