@@ -435,6 +435,8 @@ async function runFundGas(ctx, amountStr) {
 
 const ERC721_ABI = [
   'function ownerOf(uint256 tokenId) view returns (address)',
+  'function balanceOf(address owner) view returns (uint256)',
+  'function tokenOfOwnerByIndex(address owner, uint256 index) view returns (uint256)',
   'function safeTransferFrom(address from, address to, uint256 tokenId)',
   'function transferFrom(address from, address to, uint256 tokenId)',
 ];
@@ -451,24 +453,28 @@ async function runCollectNfts(ctx, contractAddress, toAddress, tokenIdList) {
       return ctx.reply('❌ Invalid destination wallet address.');
     }
 
-    const tokenIds = tokenIdList
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .map((s) => {
-        if (!/^\d+$/.test(s)) throw new Error(`Invalid token id: ${s}`);
-        return BigInt(s);
-      });
-
-    if (tokenIds.length === 0) {
-      return ctx.reply('❌ No token IDs provided. Example: 1,2,5');
-    }
-
     const provider = rpcPool.current(); // Robinhood first version
     const results = [];
+    const wantAll = String(tokenIdList || '').trim().toLowerCase() === 'all';
+
+    let tokenIds = [];
+    if (!wantAll) {
+      tokenIds = tokenIdList
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .map((s) => {
+          if (!/^\d+$/.test(s)) throw new Error(`Invalid token id: ${s}`);
+          return BigInt(s);
+        });
+
+      if (tokenIds.length === 0) {
+        return ctx.reply('❌ No token IDs provided. Example: 1,2,5  or  all');
+      }
+    }
 
     await ctx.reply(
-      `📦 Collecting <b>${tokenIds.length}</b> token(s)\n` +
+      `📦 Collecting ${wantAll ? '<b>ALL</b> tokens' : `<b>${tokenIds.length}</b> token(s)`}\n` +
       `Contract: <code>${escapeHtml(contractAddress)}</code>\n` +
       `To: <code>${escapeHtml(toAddress)}</code>\n` +
       `From: <b>${wallets.length}</b> wallets...`,
@@ -479,7 +485,28 @@ async function runCollectNfts(ctx, contractAddress, toAddress, tokenIdList) {
       const signer = w.signer.connect(provider);
       const nft = new ethers.Contract(contractAddress, ERC721_ABI, signer);
 
-      for (const tokenId of tokenIds) {
+      // If "all", discover token IDs owned by this wallet
+      let idsForWallet = tokenIds;
+      if (wantAll) {
+        try {
+          const balance = await nft.balanceOf(w.address);
+          const count = Number(balance);
+          if (count === 0) continue;
+
+          idsForWallet = [];
+          for (let i = 0; i < count; i++) {
+            const id = await nft.tokenOfOwnerByIndex(w.address, i);
+            idsForWallet.push(id);
+          }
+        } catch (err) {
+          results.push(
+            `❌ ${w.address.slice(0, 10)}... cannot list tokens (contract may not support enumerable) → ${(err.message || 'failed').slice(0, 60)}`
+          );
+          continue;
+        }
+      }
+
+      for (const tokenId of idsForWallet) {
         try {
           const owner = (await nft.ownerOf(tokenId)).toLowerCase();
           if (owner !== w.address.toLowerCase()) {
@@ -500,7 +527,7 @@ async function runCollectNfts(ctx, contractAddress, toAddress, tokenIdList) {
     }
 
     if (results.length === 0) {
-      return ctx.reply('ℹ️ None of your minting wallets own those token IDs.');
+      return ctx.reply('ℹ️ Nothing to collect (no owned tokens found).');
     }
 
     await ctx.reply(
@@ -858,7 +885,9 @@ bot.on('text', async (ctx) => {
       };
       return ctx.reply(
         '📦 Step 3/3 — Send the token IDs, separated by commas.\n\n' +
-        'Example: <code>1,2,5</code>',
+        'Examples:\n' +
+        '<code>1,2,5</code>\n' +
+        '<code>all</code> ← send every token this collection in your mint wallets',
         { parse_mode: 'HTML' }
       );
     }
@@ -1005,7 +1034,9 @@ bot.command('collect', async (ctx) => {
     pendingCollect = { step: 'contract' };
     pendingFundGas = false;
     return ctx.reply(
-      'Usage:\n<code>/collect 0xContract 0xDestination 1,2,5</code>\n\n' +
+      'Usage:\n' +
+      '<code>/collect 0xContract 0xDestination 1,2,5</code>\n' +
+      '<code>/collect 0xContract 0xDestination all</code>\n\n' +
       'Or press 📦 Collect NFTs and follow the steps.',
       { parse_mode: 'HTML' }
     );
