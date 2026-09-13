@@ -318,8 +318,10 @@ let isPaused = false;   // when true, bot detects but does not mint
 let isRhPaused = false;
 let isEthPaused = false;
 let isInkPaused = false;
-let pendingFundGas = null; // null | { step: 'chain' | 'amount', chain?: string }let pendingCollect = null;
-// null | { step: 'contract' } | { step: 'ids', contract: '0x...' }
+
+// Telegram interactive flows
+let pendingFundGas = null;   // null | { step, chain? }
+let pendingCollect = null;   // null | { step, chain?, contract?, to? }
 
 // ===== Stats + already-minted protection =====
 const successfulMints = new Set(); // contract addresses already successfully minted
