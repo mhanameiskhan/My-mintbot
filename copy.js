@@ -488,22 +488,76 @@ async function runCollectNfts(ctx, contractAddress, toAddress, tokenIdList) {
       // If "all", discover token IDs owned by this wallet
       let idsForWallet = tokenIds;
       if (wantAll) {
+        idsForWallet = [];
+
+        // 1) Try ERC721Enumerable
+        let listed = false;
         try {
           const balance = await nft.balanceOf(w.address);
           const count = Number(balance);
-          if (count === 0) continue;
-
-          idsForWallet = [];
-          for (let i = 0; i < count; i++) {
-            const id = await nft.tokenOfOwnerByIndex(w.address, i);
-            idsForWallet.push(id);
+          if (count > 0) {
+            for (let i = 0; i < count; i++) {
+              const id = await nft.tokenOfOwnerByIndex(w.address, i);
+              idsForWallet.push(id);
+            }
+            listed = true;
+          } else {
+            listed = true; // owns zero
           }
-        } catch (err) {
-          results.push(
-            `❌ ${w.address.slice(0, 10)}... cannot list tokens (contract may not support enumerable) → ${(err.message || 'failed').slice(0, 60)}`
-          );
-          continue;
+        } catch {
+          listed = false;
         }
+
+        // 2) Fallback: OpenSea account NFTs for this contract
+        if (!listed) {
+          try {
+            const chainSlug = chainConfigs.robinhood.openseaSlug || 'robinhood';
+            const contractLower = contractAddress.toLowerCase();
+            let next = null;
+            let pages = 0;
+
+            do {
+              const path =
+                `/chain/${chainSlug}/account/${w.address}/nfts?limit=50` +
+                (next ? `&next=${encodeURIComponent(next)}` : '');
+              const data = await openseaFetch(path);
+              const nfts = data.nfts || data.tokens || [];
+
+              for (const item of nfts) {
+                const itemContract = (
+                  item.contract ||
+                  item.contract_address ||
+                  item.token_contract ||
+                  ''
+                ).toLowerCase();
+                if (itemContract && itemContract !== contractLower) continue;
+
+                const idRaw =
+                  item.identifier ??
+                  item.token_id ??
+                  item.tokenId ??
+                  null;
+                if (idRaw === null || idRaw === undefined) continue;
+                idsForWallet.push(BigInt(String(idRaw)));
+              }
+
+              next = data.next || null;
+              pages += 1;
+            } while (next && pages < 10);
+
+            if (idsForWallet.length === 0) {
+              // no tokens found for this wallet
+              continue;
+            }
+          } catch (err) {
+            results.push(
+              `❌ ${w.address.slice(0, 10)}... cannot list tokens → ${(err.message || 'failed').slice(0, 70)}`
+            );
+            continue;
+          }
+        }
+
+        if (idsForWallet.length === 0) continue;
       }
 
       for (const tokenId of idsForWallet) {
@@ -887,7 +941,8 @@ bot.on('text', async (ctx) => {
         '📦 Step 3/3 — Send the token IDs, separated by commas.\n\n' +
         'Examples:\n' +
         '<code>1,2,5</code>\n' +
-        '<code>all</code> ← send every token this collection in your mint wallets',
+        '<code>all</code> ← send every token from this collection\n' +
+        '(uses enumerable, or OpenSea if needed)',
         { parse_mode: 'HTML' }
       );
     }
