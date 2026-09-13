@@ -319,6 +319,8 @@ let isRhPaused = false;
 let isEthPaused = false;
 let isInkPaused = false;
 let pendingFundGas = false; // waiting for user to type the amount
+let pendingCollect = null;
+// null | { step: 'contract' } | { step: 'ids', contract: '0x...' }
 
 // ===== Stats + already-minted protection =====
 const successfulMints = new Set(); // contract addresses already successfully minted
@@ -428,6 +430,85 @@ async function runFundGas(ctx, amountStr) {
     );
   } catch (err) {
     await ctx.reply(`❌ Fund gas failed: ${err.message}`);
+  }
+}
+
+const ERC721_ABI = [
+  'function ownerOf(uint256 tokenId) view returns (address)',
+  'function safeTransferFrom(address from, address to, uint256 tokenId)',
+  'function transferFrom(address from, address to, uint256 tokenId)',
+];
+
+async function runCollectNfts(ctx, contractAddress, toAddress, tokenIdList) {
+  try {
+    if (!wallets || wallets.length === 0) {
+      return ctx.reply('❌ No minting wallets loaded.');
+    }
+    if (!ethers.isAddress(contractAddress)) {
+      return ctx.reply('❌ Invalid NFT contract address.');
+    }
+    if (!ethers.isAddress(toAddress)) {
+      return ctx.reply('❌ Invalid destination wallet address.');
+    }
+
+    const tokenIds = tokenIdList
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((s) => {
+        if (!/^\d+$/.test(s)) throw new Error(`Invalid token id: ${s}`);
+        return BigInt(s);
+      });
+
+    if (tokenIds.length === 0) {
+      return ctx.reply('❌ No token IDs provided. Example: 1,2,5');
+    }
+
+    const provider = rpcPool.current(); // Robinhood first version
+    const results = [];
+
+    await ctx.reply(
+      `📦 Collecting <b>${tokenIds.length}</b> token(s)\n` +
+      `Contract: <code>${escapeHtml(contractAddress)}</code>\n` +
+      `To: <code>${escapeHtml(toAddress)}</code>\n` +
+      `From: <b>${wallets.length}</b> wallets...`,
+      { parse_mode: 'HTML' }
+    );
+
+    for (const w of wallets) {
+      const signer = w.signer.connect(provider);
+      const nft = new ethers.Contract(contractAddress, ERC721_ABI, signer);
+
+      for (const tokenId of tokenIds) {
+        try {
+          const owner = (await nft.ownerOf(tokenId)).toLowerCase();
+          if (owner !== w.address.toLowerCase()) {
+            continue;
+          }
+
+          const tx = await nft.safeTransferFrom(w.address, toAddress, tokenId);
+          await tx.wait();
+          results.push(
+            `✅ ${w.address.slice(0, 10)}... sent #${tokenId.toString()} | ${tx.hash.slice(0, 12)}...`
+          );
+        } catch (err) {
+          results.push(
+            `❌ ${w.address.slice(0, 10)}... #${tokenId.toString()} → ${(err.message || 'failed').slice(0, 70)}`
+          );
+        }
+      }
+    }
+
+    if (results.length === 0) {
+      return ctx.reply('ℹ️ None of your minting wallets own those token IDs.');
+    }
+
+    await ctx.reply(
+      `📦 <b>Collect NFTs result</b>\n\n` + results.join('\n'),
+      { parse_mode: 'HTML' }
+    );
+  } catch (err) {
+    await ctx.reply(`❌ Collect failed: ${err.message}`);
   }
 }
 
@@ -652,7 +733,17 @@ bot.hears('⛽ Fund Gas', async (ctx) => {
 
 bot.hears('📦 Collect NFTs', async (ctx) => {
   if (!isAuthorizedChat(ctx)) return;
-  await ctx.reply('📦 Collect NFTs is not ready yet. Gas funding first.');
+
+  pendingCollect = { step: 'contract' };
+  pendingFundGas = false;
+
+  await ctx.reply(
+    '📦 <b>Collect NFTs</b>\n\n' +
+    'Step 1/3 — Send the NFT <b>contract address</b>.\n\n' +
+    'Example:\n<code>0x1234...abcd</code>\n\n' +
+    'Or type <code>cancel</code>.',
+    { parse_mode: 'HTML' }
+  );
 });
 
 bot.hears('💰 RH Balances', async (ctx) => {
@@ -712,11 +803,9 @@ bot.hears('💜 Ink Balances', async (ctx) => {
 
 bot.on('text', async (ctx) => {
   if (!isAuthorizedChat(ctx)) return;
-  if (!pendingFundGas) return;
 
   const text = (ctx.message.text || '').trim();
 
-  // ignore commands and menu buttons
   if (
     text.startsWith('/') ||
     text.startsWith('⛽') ||
@@ -736,23 +825,52 @@ bot.on('text', async (ctx) => {
 
   if (text.toLowerCase() === 'cancel') {
     pendingFundGas = false;
+    pendingCollect = null;
     return ctx.reply('Cancelled.');
   }
 
-  pendingFundGas = false;
-  await runFundGas(ctx, text);
-});
+  if (pendingFundGas) {
+    pendingFundGas = false;
+    await runFundGas(ctx, text);
+    return;
+  }
 
-// ===== END BUTTON MENU =====
+  if (pendingCollect) {
+    if (pendingCollect.step === 'contract') {
+      if (!ethers.isAddress(text)) {
+        return ctx.reply('❌ Invalid contract address. Try again, or type cancel.');
+      }
+      pendingCollect = { step: 'destination', contract: text };
+      return ctx.reply(
+        '📦 Step 2/3 — Send the <b>destination wallet address</b> (where NFTs should go).',
+        { parse_mode: 'HTML' }
+      );
+    }
 
-bot.command('help', (ctx) => {
-  ctx.reply(
-    'Commands:\n' +
-      '/addwallet <address> — start watching a wallet\n' +
-      '/removewallet <address> — stop watching a wallet\n' +
-      '/wallets — list watched wallets and how many\n' +
-      '/status — bot status (dry run, poll interval)'
-  );
+    if (pendingCollect.step === 'destination') {
+      if (!ethers.isAddress(text)) {
+        return ctx.reply('❌ Invalid destination address. Try again, or type cancel.');
+      }
+      pendingCollect = {
+        step: 'ids',
+        contract: pendingCollect.contract,
+        to: text,
+      };
+      return ctx.reply(
+        '📦 Step 3/3 — Send the token IDs, separated by commas.\n\n' +
+        'Example: <code>1,2,5</code>',
+        { parse_mode: 'HTML' }
+      );
+    }
+
+    if (pendingCollect.step === 'ids') {
+      const contract = pendingCollect.contract;
+      const to = pendingCollect.to;
+      pendingCollect = null;
+      await runCollectNfts(ctx, contract, to, text);
+      return;
+    }
+  }
 });
 
 bot.command('addwallet', async (ctx) => {
@@ -872,6 +990,28 @@ bot.command('fundgas', async (ctx) => {
   }
 
   await runFundGas(ctx, amountStr);
+});
+
+bot.command('collect', async (ctx) => {
+  if (!isAuthorizedChat(ctx)) return;
+
+  const parts = (ctx.message.text || '').trim().split(/\s+/);
+  // /collect 0xContract 0xDestination 1,2,5
+  const contract = parts[1];
+  const toAddress = parts[2];
+  const ids = parts[3];
+
+  if (!contract || !toAddress || !ids) {
+    pendingCollect = { step: 'contract' };
+    pendingFundGas = false;
+    return ctx.reply(
+      'Usage:\n<code>/collect 0xContract 0xDestination 1,2,5</code>\n\n' +
+      'Or press 📦 Collect NFTs and follow the steps.',
+      { parse_mode: 'HTML' }
+    );
+  }
+
+  await runCollectNfts(ctx, contract, toAddress, ids);
 });
 
 // ---------------------------------------------------------------------------
