@@ -905,8 +905,8 @@ bot.hears('💜 Ink Balances', async (ctx) => {
   }
 });
 
-bot.on('text', async (ctx) => {
-  if (!isAuthorizedChat(ctx)) return;
+bot.on('text', async (ctx, next) => {
+  if (!isAuthorizedChat(ctx)) return next();
 
   const text = (ctx.message.text || '').trim();
 
