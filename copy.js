@@ -910,6 +910,7 @@ bot.on('text', async (ctx) => {
 
   const text = (ctx.message.text || '').trim();
 
+  // Let commands and menu buttons be handled by their own handlers
   if (
     text.startsWith('/') ||
     text.startsWith('⛽') ||
@@ -924,7 +925,13 @@ bot.on('text', async (ctx) => {
     text.startsWith('👛') ||
     text.startsWith('ℹ️')
   ) {
-    return;
+     return next();
+  }
+
+  
+  // If no interactive flow is active, do not block other handlers
+  if (!pendingFundGas && !pendingCollect) {
+    return next();
   }
 
   if (text.toLowerCase() === 'cancel') {
@@ -1009,6 +1016,8 @@ bot.on('text', async (ctx) => {
       return;
     }
   }
+
+  return next();
 });
 
 bot.command('addwallet', async (ctx) => {
