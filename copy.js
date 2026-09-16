@@ -623,7 +623,8 @@ async function runCollectNfts(ctx, contractAddress, toAddress, tokenIdList, chai
 // ===== BUTTON MENU =====
 const mainMenu = Markup.keyboard([
   ['📊 Status', '👛 Wallets'],
-  ['💰 RH Balances', '💎 ETH Balances', '💜 Ink Balances'],
+  ['💰 RH Balances', '💎 ETH Balances'],
+  ['💜 Ink Balances', '🟧 ARC Balances'],
   ['⏸ Pause RH', '▶️ Resume RH'],
   ['⏸ Pause ETH', '▶️ Resume ETH'],
   ['⏸ Pause Ink', '▶️ Resume Ink'],
@@ -931,6 +932,26 @@ bot.hears('💜 Ink Balances', async (ctx) => {
   }
 });
 
+bot.hears('🟧 ARC Balances', async (ctx) => {
+  if (!isAuthorizedChat(ctx)) return;
+  try {
+    if (!arcRpcPool) {
+      return ctx.reply('Arc RPC not ready (is ARC_ENABLED=true and RPCs set?)');
+    }
+    const provider = arcRpcPool.current();
+    const list = wallets.length > 0 ? wallets : [{ address: WALLET_ADDRESS }];
+    let message = `🟧 <b>Arc balances</b> (native USDC)\n\n`;
+    for (const w of list) {
+      const balance = await provider.getBalance(w.address);
+      const amount = Number(ethers.formatEther(balance)).toFixed(5);
+      message += `<code>${escapeHtml(w.address.slice(0, 10))}...</code> → <b>${amount} USDC</b>\n`;
+    }
+    await ctx.reply(message, { parse_mode: 'HTML' });
+  } catch (err) {
+    await ctx.reply(`❌ Arc balances failed: ${err.message}`);
+  }
+});
+
 bot.on('text', async (ctx, next) => {
   if (!isAuthorizedChat(ctx)) return next();
 
@@ -948,6 +969,7 @@ bot.on('text', async (ctx, next) => {
     text.startsWith('💰') ||
     text.startsWith('💎') ||
     text.startsWith('💜') ||
+    text.startsWith('🟧') ||
     text.startsWith('👛') ||
     text.startsWith('ℹ️')
   ) {
