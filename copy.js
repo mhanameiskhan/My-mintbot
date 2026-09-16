@@ -220,20 +220,20 @@ const chainConfigs = {
     maxPriceEth: ETH_MAX_PRICE_ETH,
     dryRun: ETH_DRY_RUN,
   },
-    arc: {
+  arc: {
     name: 'arc',
     enabled: (process.env.ARC_ENABLED || 'false').toLowerCase() === 'true',
-    chainId: Number(process.env.ARC_CHAIN_ID || 0),
-    rpcUrls: (process.env.ARC_RPC_URLS || '')
+    chainId: Number(process.env.ARC_CHAIN_ID || 5042),
+    rpcUrls: (process.env.ARC_RPC_URLS || 'https://rpc.mainnet.arc.io')
       .split(',')
       .map(s => s.trim())
       .filter(Boolean),
-    openseaSlug: process.env.ARC_OPENSEA_SLUG || '',
-    explorerApiBase: process.env.ARC_EXPLORER_API_BASE || '',
+    openseaSlug: process.env.ARC_OPENSEA_SLUG || 'arc',
+    explorerApiBase: process.env.ARC_EXPLORER_API_BASE || 'https://explorer.arc.io/api',
     explorerApiKey: process.env.ARC_EXPLORER_API_KEY || '',
     maxPriceEth:
       process.env.ARC_MAX_PRICE_ETH === undefined || String(process.env.ARC_MAX_PRICE_ETH).trim() === ''
-        ? 0
+        ? null
         : Number(process.env.ARC_MAX_PRICE_ETH),
     dryRun: (process.env.ARC_DRY_RUN || 'true').toLowerCase() !== 'false',
   },
@@ -318,6 +318,8 @@ let isPaused = false;   // when true, bot detects but does not mint
 let isRhPaused = false;
 let isEthPaused = false;
 let isInkPaused = false;
+let isArcPaused = false;
+
 
 // Telegram interactive flows
 let pendingFundGas = null;   // null | { step, chain? }
@@ -380,7 +382,10 @@ function getChainRpcPool(chainKey) {
     if (!inkRpcPool) throw new Error('Ink RPC not ready');
     return { pool: inkRpcPool, label: 'Ink', openseaSlug: chainConfigs.ink.openseaSlug || 'ink' };
   }
-  // default robinhood
+  if (key === 'arc') {
+    if (!arcRpcPool) throw new Error('Arc RPC not ready');
+    return { pool: arcRpcPool, label: 'Arc', openseaSlug: chainConfigs.arc.openseaSlug || 'arc' };
+  }
   return {
     pool: rpcPool,
     label: 'Robinhood',
@@ -393,6 +398,7 @@ function parseChainKey(text) {
   if (t === 'rh' || t === 'robinhood') return 'rh';
   if (t === 'eth' || t === 'ethereum') return 'eth';
   if (t === 'ink') return 'ink';
+  if (t === 'arc') return 'arc';
   return null;
 }
 
@@ -621,6 +627,7 @@ const mainMenu = Markup.keyboard([
   ['⏸ Pause RH', '▶️ Resume RH'],
   ['⏸ Pause ETH', '▶️ Resume ETH'],
   ['⏸ Pause Ink', '▶️ Resume Ink'],
+  ['⏸ Pause ARC', '▶️ Resume ARC'],
   ['🎯 Sponsor ON', '🎯 Sponsor OFF'],
   ['⛽ Fund Gas', '📦 Collect NFTs'],
   ['⏸ Pause All', '▶️ Resume All'],
@@ -679,6 +686,11 @@ bot.hears('📊 Status', async (ctx) => {
     `Enabled: <b>${chainConfigs.ink.enabled ? 'ON' : 'OFF'}</b>\n` +
     `Max price: <b>${chainConfigs.ink.maxPriceEth ?? 'not set'}</b>\n\n` +
     `🔢 Quantities: <b>${process.env.QUANTITY_TRIES || '10,5,3,2,1'}</b>`;
+    `🟧 <b>Arc</b>\n` +
+    `State: <b>${isArcPaused ? '⏸ Paused' : '▶️ Running'}</b>\n` +
+    `Mode: <b>${chainConfigs.arc.dryRun ? '🧪 Dry Run' : '🔥 Live'}</b>\n` +
+    `Enabled: <b>${chainConfigs.arc.enabled ? 'ON' : 'OFF'}</b>\n` +
+    `Max price: <b>${chainConfigs.arc.maxPriceEth ?? 'not set'}</b>\n\n` +
 
   await ctx.reply(message, { parse_mode: 'HTML' });
 });
@@ -780,12 +792,25 @@ bot.hears('▶️ Resume Ink', async (ctx) => {
   await ctx.reply('▶️ Ink resumed');
 });
 
+bot.hears('⏸ Pause ARC', async (ctx) => {
+  if (!isAuthorizedChat(ctx)) return;
+  isArcPaused = true;
+  await ctx.reply('⏸ Arc paused');
+});
+
+bot.hears('▶️ Resume ARC', async (ctx) => {
+  if (!isAuthorizedChat(ctx)) return;
+  isArcPaused = false;
+  await ctx.reply('▶️ Arc resumed');
+});
+
 bot.hears('⏸ Pause All', async (ctx) => {
   if (!isAuthorizedChat(ctx)) return;
   isPaused = true;
   isRhPaused = true;
   isEthPaused = true;
   isInkPaused = true;
+  isArcPaused = true;
   await ctx.reply('⏸ All minting paused');
 });
 
@@ -795,6 +820,7 @@ bot.hears('▶️ Resume All', async (ctx) => {
   isRhPaused = false;
   isEthPaused = false;
   isInkPaused = false;
+  isArcPaused = false;
   await ctx.reply('▶️ All minting resumed');
 });
 
@@ -829,7 +855,7 @@ bot.hears('⛽ Fund Gas', async (ctx) => {
   await ctx.reply(
     '⛽ <b>Fund Gas</b>\n\n' +
     'Step 1/2 — Choose chain:\n' +
-    '<code>rh</code> / <code>eth</code> / <code>ink</code>\n\n' +
+    '<code>rh</code> / <code>eth</code> / <code>ink</code> / <code>arc</code>\n\n' +
     'Or type <code>cancel</code>.',
     { parse_mode: 'HTML' }
   );
@@ -844,7 +870,7 @@ bot.hears('📦 Collect NFTs', async (ctx) => {
   await ctx.reply(
     '📦 <b>Collect NFTs</b>\n\n' +
     'Step 1/4 — Choose chain:\n' +
-    '<code>rh</code> / <code>eth</code> / <code>ink</code>\n\n' +
+    '<code>rh</code> / <code>eth</code> / <code>ink</code> / <code>arc</code>\n\n' +
     'Or type <code>cancel</code>.',
     { parse_mode: 'HTML' }
   );
@@ -1114,6 +1140,11 @@ bot.command('status', async (ctx) => {
     `Enabled: <b>${chainConfigs.ink.enabled ? 'ON' : 'OFF'}</b>\n` +
     `Max price: <b>${chainConfigs.ink.maxPriceEth ?? 'not set'}</b>\n\n` +
     `🔢 Quantities: <b>${process.env.QUANTITY_TRIES || '10,5,3,2,1'}</b>`;
+    `🟧 <b>Arc</b>\n` +
+    `State: <b>${isArcPaused ? '⏸ Paused' : '▶️ Running'}</b>\n` +
+    `Mode: <b>${chainConfigs.arc.dryRun ? '🧪 Dry Run' : '🔥 Live'}</b>\n` +
+    `Enabled: <b>${chainConfigs.arc.enabled ? 'ON' : 'OFF'}</b>\n` +
+    `Max price: <b>${chainConfigs.arc.maxPriceEth ?? 'not set'}</b>\n\n` +
 
   await ctx.reply(message, { parse_mode: 'HTML' });
 });
@@ -1300,6 +1331,16 @@ const inkRpcPool = chainConfigs.ink.enabled && chainConfigs.ink.rpcUrls.length >
 
 let inkLastCheckedBlock = null;
 const inkSeenTxHashes = new Set();
+
+// ===== Arc RPC pool =====
+const arcRpcPool = chainConfigs.arc.enabled && chainConfigs.arc.rpcUrls.length > 0
+  ? new RpcPool(chainConfigs.arc.rpcUrls, chainConfigs.arc.chainId)
+  : null;
+
+let arcLastCheckedBlock = null;
+const arcSeenTxHashes = new Set();
+let isArcPaused = false;
+// ===== End Arc RPC pool =====
 // ===== End Ink RPC pool =====
 
 // ---------------------------------------------------------------------------
@@ -1519,16 +1560,18 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet, chainName =
   }
 
     const chain = chainConfigs[chainName] || chainConfigs.robinhood;
-    const activeRpcPool =
+  const activeRpcPool =
     chainName === 'ethereum' ? ethRpcPool :
     chainName === 'ink' ? inkRpcPool :
+    chainName === 'arc' ? arcRpcPool :
     rpcPool;
   const activeDryRun = chain.dryRun;
   const activeMaxPrice = chain.maxPriceEth;
   const activeOpenseaSlug = chain.openseaSlug;
-    const chainLabel =
+  const chainLabel =
     chainName === 'ethereum' ? '🟦 ETH' :
     chainName === 'ink' ? '💜 INK' :
+    chainName === 'arc' ? '🟧 ARC' :
     '🟢 RH';
 
   if (chainName === 'ethereum' && isEthPaused) {
@@ -1539,6 +1582,10 @@ async function copyMint(contractAddress, sourceTxHash, sourceWallet, chainName =
     await notify(`⏸ Ink is paused. Skipping.`);
     return;
 }
+  if (chainName === 'arc' && isArcPaused) {
+    await notify(`⏸ Arc is paused. Skipping.`);
+    return;
+  }
 if (chainName === 'robinhood' && isRhPaused) {
   await notify(`⏸ Robinhood is paused. Skipping.`);
   return;
@@ -1953,6 +2000,71 @@ async function inkPollLoop() {
 }
 // ===== End Ink watcher =====
 
+// ===== Arc watcher =====
+async function getArcLatestBlock() {
+  if (!arcRpcPool) throw new Error('Arc RPC pool not initialized');
+  return arcRpcPool.withFailover((p) => p.getBlockNumber());
+}
+
+async function findArcMintsInRange(fromBlock, toBlock) {
+  const paddedNull = ethers.zeroPadValue(NULL_ADDRESS, 32);
+  const logs = await arcRpcPool.withFailover((p) =>
+    p.getLogs({
+      fromBlock,
+      toBlock,
+      topics: [ERC721_TRANSFER_TOPIC, paddedNull],
+    })
+  );
+
+  const mints = [];
+  for (const log of logs) {
+    if (log.topics.length < 3) continue;
+    const toAddress = ethers.getAddress('0x' + log.topics[2].slice(26)).toLowerCase();
+    if (!watchedWallets.includes(toAddress)) continue;
+    if (arcSeenTxHashes.has(log.transactionHash)) continue;
+    arcSeenTxHashes.add(log.transactionHash);
+    mints.push({
+      contractAddress: log.address,
+      txHash: log.transactionHash,
+      wallet: toAddress,
+    });
+  }
+  return mints;
+}
+
+async function arcPollLoop() {
+  if (!chainConfigs.arc.enabled || !arcRpcPool) return;
+
+  try {
+    const latest = await getArcLatestBlock();
+    const safeLatest = Math.max(latest - 2, 0);
+
+    if (arcLastCheckedBlock === null) {
+      arcLastCheckedBlock = safeLatest;
+      console.log(`[arc-init] starting from block ${arcLastCheckedBlock}`);
+    }
+
+    if (safeLatest > arcLastCheckedBlock) {
+      const MAX_BLOCKS_PER_SCAN = 200;
+      const toBlock = Math.min(arcLastCheckedBlock + MAX_BLOCKS_PER_SCAN, safeLatest);
+
+      console.log(`[arc-poll] scanning blocks ${arcLastCheckedBlock + 1} → ${toBlock}`);
+
+      const mints = await findArcMintsInRange(arcLastCheckedBlock + 1, toBlock);
+      for (const mint of mints) {
+        await copyMint(mint.contractAddress, mint.txHash, mint.wallet, 'arc');
+      }
+
+      arcLastCheckedBlock = toBlock;
+    }
+  } catch (err) {
+    console.error(`[arc-poll] ${err.message}`);
+  }
+
+  setTimeout(arcPollLoop, POLL_INTERVAL_MS);
+}
+// ===== End Arc watcher =====
+
 // ---------------------------------------------------------------------------
 // Startup
 // ---------------------------------------------------------------------------
@@ -1992,6 +2104,11 @@ async function main() {
   if (chainConfigs.ink.enabled && inkRpcPool) {
     console.log('[startup] starting Ink poll loop...');
     inkPollLoop();
+  }
+  
+  if (chainConfigs.arc.enabled && arcRpcPool) {
+    console.log('[startup] starting Arc poll loop...');
+    arcPollLoop();
   }
 
   // Daily summary at 20:00 UTC every day
