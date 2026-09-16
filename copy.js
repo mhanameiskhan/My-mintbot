@@ -1331,6 +1331,7 @@ const inkRpcPool = chainConfigs.ink.enabled && chainConfigs.ink.rpcUrls.length >
 
 let inkLastCheckedBlock = null;
 const inkSeenTxHashes = new Set();
+// ===== End Ink RPC pool =====
 
 // ===== Arc RPC pool =====
 const arcRpcPool = chainConfigs.arc.enabled && chainConfigs.arc.rpcUrls.length > 0
@@ -1339,9 +1340,7 @@ const arcRpcPool = chainConfigs.arc.enabled && chainConfigs.arc.rpcUrls.length >
 
 let arcLastCheckedBlock = null;
 const arcSeenTxHashes = new Set();
-let isArcPaused = false;
 // ===== End Arc RPC pool =====
-// ===== End Ink RPC pool =====
 
 // ---------------------------------------------------------------------------
 // OpenSea helpers
