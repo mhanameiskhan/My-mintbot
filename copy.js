@@ -423,6 +423,7 @@ async function runFundGas(ctx, amountStr, chainKey = 'rh') {
     const totalNeeded = amountWei * BigInt(wallets.length);
 
     const { pool, label } = getChainRpcPool(chainKey);
+    const tokenName = String(chainKey).toLowerCase() === 'arc' ? 'USDC' : 'ETH';
     const provider = pool.current();
     const funder = sponsorWallet.signer.connect(provider);
 
@@ -430,13 +431,13 @@ async function runFundGas(ctx, amountStr, chainKey = 'rh') {
     if (balance < totalNeeded) {
       return ctx.reply(
         `❌ Funder balance too low on ${label}.\n` +
-        `Need at least ~${ethers.formatEther(totalNeeded)} ETH for transfers (plus gas).\n` +
-        `Funder balance: ${ethers.formatEther(balance)} ETH`
+        `Need at least ~${ethers.formatEther(totalNeeded)} ${tokenName} for transfers (plus gas).\n` +
+        `Funder balance: ${ethers.formatEther(balance)} ${tokenName}`
       );
     }
 
     await ctx.reply(
-      `⛽ Sending <b>${amountEth}</b> ETH on <b>${label}</b> to <b>${wallets.length}</b> wallets...\n` +
+      `⛽ Sending <b>${amountEth}</b> ${tokenName} on <b>${label}</b> to <b>${wallets.length}</b> wallets...\n` +
       `From: <code>${escapeHtml(sponsorWallet.address.slice(0, 12))}...</code>`,
       { parse_mode: 'HTML' }
     );
@@ -452,7 +453,7 @@ async function runFundGas(ctx, amountStr, chainKey = 'rh') {
         });
         await tx.wait();
         successCount += 1;
-        results.push(`✅ ${w.address.slice(0, 10)}... ${amountEth} ETH | ${tx.hash.slice(0, 12)}...`);
+        results.push(`✅ ${w.address.slice(0, 10)}... ${amountEth} ${tokenName} | ${tx.hash.slice(0, 12)}...`);
       } catch (err) {
         results.push(`❌ ${w.address.slice(0, 10)}... ${(err.message || 'failed').slice(0, 80)}`);
       }
@@ -996,8 +997,10 @@ bot.on('text', async (ctx, next) => {
         return ctx.reply('❌ Invalid chain. Use: rh / eth / ink');
       }
       pendingFundGas = { step: 'amount', chain: chainKey };
+      const tokenName = chainKey === 'arc' ? 'USDC' : 'ETH';
       return ctx.reply(
-        '⛽ Step 2/2 — Send amount of ETH for <b>each</b> wallet.\n\nExample: <code>0.002</code>',
+        `⛽ Step 2/2 — Send amount of <b>${tokenName}</b> for <b>each</b> wallet.\n\n` +
+        `Example: <code>0.002</code>`,
         { parse_mode: 'HTML' }
       );
     }
@@ -1186,8 +1189,9 @@ bot.command('fundgas', async (ctx) => {
   if (!amountStr) {
     pendingFundGas = { step: 'chain' };
     return ctx.reply(
-      'Usage: <code>/fundgas 0.002 rh</code>\n' +
-      'Chains: <code>rh</code> / <code>eth</code> / <code>ink</code>',
+      'Usage: <code>/fundgas 0.002 arc</code>\n' +
+      'Chains: <code>rh</code> / <code>eth</code> / <code>ink</code> / <code>arc</code>\n' +
+      'Note: on Arc amount is native USDC',
       { parse_mode: 'HTML' }
     );
   }
