@@ -788,16 +788,16 @@ bot.hears('⏸ Pause Ink', async (ctx) => {
   await ctx.reply('⏸ Ink paused');
 });
 
+bot.hears('▶️ Resume Ink', async (ctx) => {
+  if (!isAuthorizedChat(ctx)) return;
+  isInkPaused = false;
+  await ctx.reply('▶️ Ink resumed');
+});
+
 bot.hears('⏸ Pause ARC', async (ctx) => {
   if (!isAuthorizedChat(ctx)) return;
   isArcPaused = true;
   await ctx.reply('⏸ Arc paused');
-});
-
-bot.hears('▶️ Resume ARC', async (ctx) => {
-  if (!isAuthorizedChat(ctx)) return;
-  isArcPaused = false;
-  await ctx.reply('▶️ Arc resumed');
 });
 
 bot.hears('▶️ Resume ARC', async (ctx) => {
@@ -1164,12 +1164,12 @@ bot.command('status', async (ctx) => {
     `Mode: <b>${chainConfigs.ink.dryRun ? '🧪 Dry Run' : '🔥 Live'}</b>\n` +
     `Enabled: <b>${chainConfigs.ink.enabled ? 'ON' : 'OFF'}</b>\n` +
     `Max price: <b>${chainConfigs.ink.maxPriceEth ?? 'not set'}</b>\n\n` +
-    `🔢 Quantities: <b>${process.env.QUANTITY_TRIES || '10,5,3,2,1'}</b>`;
     `🟧 <b>Arc</b>\n` +
     `State: <b>${isArcPaused ? '⏸ Paused' : '▶️ Running'}</b>\n` +
     `Mode: <b>${chainConfigs.arc.dryRun ? '🧪 Dry Run' : '🔥 Live'}</b>\n` +
     `Enabled: <b>${chainConfigs.arc.enabled ? 'ON' : 'OFF'}</b>\n` +
     `Max price: <b>${chainConfigs.arc.maxPriceEth ?? 'not set'}</b>\n\n` +
+    `🔢 Quantities: <b>${process.env.QUANTITY_TRIES || '10,5,3,2,1'}</b>`;
 
   await ctx.reply(message, { parse_mode: 'HTML' });
 });
@@ -1441,7 +1441,8 @@ async function attemptDirectMint(contractAddress, sourceWallet, chainName = 'rob
 
   const activeRpcPool =
     chainName === 'ethereum' ? ethRpcPool :
-    chainName === 'ink'     ? inkRpcPool :
+    chainName === 'ink' ? inkRpcPool :
+    chainName === 'arc' ? arcRpcPool :
     rpcPool;
 
   const activeDryRun = chain.dryRun;
