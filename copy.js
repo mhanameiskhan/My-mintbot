@@ -2058,7 +2058,10 @@ async function findArcMintsInRange(fromBlock, toBlock) {
 }
 
 async function arcPollLoop() {
-  if (!chainConfigs.arc.enabled || !arcRpcPool) return;
+  if (!chainConfigs.arc.enabled || !arcRpcPool) {
+    console.warn('[arc-poll] skipped: enabled or rpcPool missing');
+    return;
+  }
 
   try {
     const latest = await getArcLatestBlock();
@@ -2131,11 +2134,15 @@ async function main() {
     inkPollLoop();
   }
   
+  console.log(
+    `[startup] Arc check: enabled=${chainConfigs.arc.enabled} rpcPool=${arcRpcPool ? 'yes' : 'no'} rpcs=${chainConfigs.arc.rpcUrls.length}`
+  );
   if (chainConfigs.arc.enabled && arcRpcPool) {
     console.log('[startup] starting Arc poll loop...');
     arcPollLoop();
+  } else {
+    console.warn('[startup] Arc poll loop NOT started');
   }
-
   // Daily summary at 20:00 UTC every day
   function msUntilNext8pmUTC() {
     const now = new Date();
