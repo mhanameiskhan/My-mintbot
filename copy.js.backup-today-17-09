@@ -1806,10 +1806,15 @@ const mintOne = async (targetWallet) => {
   }
 };
 
-  // Sequential: one wallet at a time (more consistent, less race)
-  for (const targetWallet of targetWallets) {
-    await mintOne(targetWallet);
+if (useSponsor) {
+  // one by one (safer)
+  for (const w of targetWallets) {
+    await mintOne(w);
   }
+} else {
+  // normal parallel mode
+  await Promise.all(targetWallets.map(w => mintOne(w)));
+}
 
   // Final summary message
   let summary =
