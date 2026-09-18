@@ -338,6 +338,10 @@ const dailyStats = {
   startedAt: Date.now(),
 };
 
+function todayUtcDate() {
+  return new Date().toISOString().slice(0, 10); // YYYY-MM-DD UTC
+}
+
 function resetDailyStats() {
   dailyStats.detected = 0;
   dailyStats.attempted = 0;
@@ -345,6 +349,57 @@ function resetDailyStats() {
   dailyStats.failed = 0;
   dailyStats.skipped = 0;
   dailyStats.startedAt = Date.now();
+}
+
+async function loadDailyStats() {
+  const day = todayUtcDate();
+  try {
+    const { data, error } = await supabase
+      .from('bot_daily_stats')
+      .select('*')
+      .eq('day', day)
+      .maybeSingle();
+
+    if (error) throw error;
+
+    if (data) {
+      dailyStats.detected = data.detected || 0;
+      dailyStats.attempted = data.attempted || 0;
+      dailyStats.success = data.success || 0;
+      dailyStats.failed = data.failed || 0;
+      dailyStats.skipped = data.skipped || 0;
+      console.log(`[stats] loaded today ${day}:`, {
+        detected: dailyStats.detected,
+        attempted: dailyStats.attempted,
+        success: dailyStats.success,
+        failed: dailyStats.failed,
+        skipped: dailyStats.skipped,
+      });
+    } else {
+      resetDailyStats();
+      console.log(`[stats] no row for ${day}, starting fresh`);
+    }
+  } catch (err) {
+    console.error(`[stats] load failed: ${err.message}`);
+  }
+}
+
+async function saveDailyStats() {
+  const day = todayUtcDate();
+  try {
+    const { error } = await supabase.from('bot_daily_stats').upsert({
+      day,
+      detected: dailyStats.detected,
+      attempted: dailyStats.attempted,
+      success: dailyStats.success,
+      failed: dailyStats.failed,
+      skipped: dailyStats.skipped,
+      updated_at: new Date().toISOString(),
+    });
+    if (error) throw error;
+  } catch (err) {
+    console.error(`[stats] save failed: ${err.message}`);
+  }
 }
 // ===== End stats =====
 
@@ -1626,6 +1681,7 @@ if (chainName === 'robinhood' && isRhPaused) {
 
   const contractKey = contractAddress.toLowerCase();
   dailyStats.detected += 1;
+  await saveDailyStats();
 
   console.log(`\n[mint detected] wallet=${sourceWallet} contract=${contractAddress} source_tx=${sourceTxHash}`);
 
@@ -1713,6 +1769,7 @@ const receipt = await provider.getTransactionReceipt(sourceTxHash);
 
     if (pending.length === 0) {
       dailyStats.skipped += 1;
+      await saveDailyStats();
       await notify(
         `⏭ <b>${chainLabel} skipped</b>\n` +
         `Contract: <code>${escapeHtml(contractAddress)}</code>\n` +
@@ -1737,6 +1794,7 @@ if (useSponsor) {
 }
 
 dailyStats.attempted += 1;
+await saveDailyStats();
 let successCount = 0;
 const results = [];
 
@@ -1806,6 +1864,7 @@ const mintOne = async (targetWallet) => {
         successCount++;
         successfulMints.add(`${contractKey}:${targetWallet.address.toLowerCase()}`);
         dailyStats.success += 1;
+        await saveDailyStats();
         break;
       } else {
         lastError = `Transaction reverted`;
@@ -1836,6 +1895,7 @@ const mintOne = async (targetWallet) => {
 
   if (successCount === 0) {
     dailyStats.failed += 1;
+    await saveDailyStats();
     summary += `\n\n⚠️ All OpenSea attempts failed. Trying direct mint fallback...`;
     await notify(summary);
     return attemptDirectMint(contractAddress, sourceWallet, chainName);
@@ -2114,6 +2174,8 @@ async function main() {
   console.log('[startup] refreshing watched wallets from Supabase...');
   await withTimeout(refreshWatchedWallets(), 15000, 'Supabase initial wallet load');
   console.log(`[startup] loaded ${watchedWallets.length} watched wallet(s)`);
+  console.log('[startup] loading daily stats from Supabase...');
+  await loadDailyStats();
   setInterval(refreshWatchedWallets, WALLET_REFRESH_MS);
 
   console.log('[startup] launching Telegram bot (long-poll)...');
