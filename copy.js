@@ -326,7 +326,9 @@ let pendingFundGas = null;   // null | { step, chain? }
 let pendingCollect = null;   // null | { step, chain?, contract?, to? }
 
 // ===== Stats + already-minted protection =====
-const successfulMints = new Set(); // contract addresses already successfully minted
+// Track successful mints per contract+wallet so failed wallets can retry later
+// key format: `${contractLower}:${walletLower}`
+const successfulMints = new Set();
 const dailyStats = {
   detected: 0,
   attempted: 0,
@@ -1623,20 +1625,7 @@ if (chainName === 'robinhood' && isRhPaused) {
   }
 
   const contractKey = contractAddress.toLowerCase();
-
-  // If we already successfully minted this collection, skip
-  if (successfulMints.has(contractKey)) {
-    dailyStats.detected += 1;
-    dailyStats.skipped += 1;
-    await notify(
-      `⏭ <b>${chainLabel} skipped</b>\n` +
-      `Contract: <code>${escapeHtml(contractAddress)}</code>\n` +
-      `Already successfully minted this collection earlier.`
-    );
-    return;
-  }
-
-  dailyStats.detected += 1;  
+  dailyStats.detected += 1;
 
   console.log(`\n[mint detected] wallet=${sourceWallet} contract=${contractAddress} source_tx=${sourceTxHash}`);
 
@@ -1706,14 +1695,40 @@ const receipt = await provider.getTransactionReceipt(sourceTxHash);
     `Wallets: <b>${wallets.length || 1}</b>`
   );
 
-  const targetWallets = activeDryRun
-  ? [{ address: (wallets[0]?.address || WALLET_ADDRESS || ethers.ZeroAddress) }]
-  : wallets;
+  let targetWallets = activeDryRun
+    ? [{ address: (wallets[0]?.address || WALLET_ADDRESS || ethers.ZeroAddress) }]
+    : wallets;
 
-if (targetWallets.length === 0) {
-  await notify(`❌ No minting wallets configured`);
-  return;
-}
+  if (targetWallets.length === 0) {
+    await notify(`❌ No minting wallets configured`);
+    return;
+  }
+
+  // Skip wallets that already succeeded on this contract
+  if (!activeDryRun) {
+    const pending = targetWallets.filter((w) => {
+      const key = `${contractKey}:${w.address.toLowerCase()}`;
+      return !successfulMints.has(key);
+    });
+
+    if (pending.length === 0) {
+      dailyStats.skipped += 1;
+      await notify(
+        `⏭ <b>${chainLabel} skipped</b>\n` +
+        `Contract: <code>${escapeHtml(contractAddress)}</code>\n` +
+        `All minting wallets already succeeded on this collection.`
+      );
+      return;
+    }
+
+    if (pending.length < targetWallets.length) {
+      await notify(
+        `ℹ️ Retrying only <b>${pending.length}/${targetWallets.length}</b> wallets that have not succeeded yet.`
+      );
+    }
+
+    targetWallets = pending;
+  }
 
 const useSponsor = isSponsorMode && sponsorWallet && !activeDryRun;
 
@@ -1789,7 +1804,7 @@ const mintOne = async (targetWallet) => {
         );
         walletSuccess = true;
         successCount++;
-        successfulMints.add(contractKey);
+        successfulMints.add(`${contractKey}:${targetWallet.address.toLowerCase()}`);
         dailyStats.success += 1;
         break;
       } else {
