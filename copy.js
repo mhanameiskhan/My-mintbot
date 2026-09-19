@@ -662,6 +662,7 @@ async function runListOffers(ctx, chainKey, contractAddress, minPrice, maxPrice)
     }
 
     const { label, openseaSlug } = getChainRpcPool(chainKey);
+    const contractLower = contractAddress.toLowerCase();
 
     await ctx.reply(
       `🔎 Scanning offers on <b>${label}</b>\n` +
@@ -677,20 +678,25 @@ async function runListOffers(ctx, chainKey, contractAddress, minPrice, maxPrice)
     } catch (err) {
       return ctx.reply(`❌ OpenSea collection lookup failed: ${err.message}`);
     }
-    if (!slug) return ctx.reply('❌ No OpenSea collection found for that contract.');
+    if (!slug) return ctx.reply('❌ No OpenSea collection found for that contract on this chain.');
 
     let ethUsd = null;
     try { ethUsd = await getEthPriceUsd(); } catch { /* optional */ }
 
+    let ownedCount = 0;
+    let offerChecked = 0;
+    let offerFound = 0;
+    let filteredOut = 0;
     const matches = [];
+    const debugOwned = [];
 
     for (const w of wallets) {
-      // NFTs this wallet owns in this collection (via OpenSea account endpoint)
       let tokenIds = [];
+
+      // 1) OpenSea account NFTs
       try {
         let next = null;
         let pages = 0;
-        const contractLower = contractAddress.toLowerCase();
         do {
           const path =
             `/chain/${openseaSlug}/account/${w.address}/nfts?limit=50` +
@@ -698,68 +704,115 @@ async function runListOffers(ctx, chainKey, contractAddress, minPrice, maxPrice)
           const data = await openseaFetch(path);
           const nfts = data.nfts || [];
           for (const item of nfts) {
-            const c = (item.contract || item.contract_address || '').toLowerCase();
+            const c = String(
+              item.contract ||
+              item.contract_address ||
+              item.token_contract ||
+              item.collection?.contract ||
+              ''
+            ).toLowerCase();
             if (c && c !== contractLower) continue;
-            const id = item.identifier ?? item.token_id;
+            // if contract field missing, still try when collection slug matches
+            const itemSlug = item.collection || item.collection_slug || '';
+            if (!c && itemSlug && String(itemSlug).toLowerCase() !== String(slug).toLowerCase()) continue;
+            if (!c && !itemSlug) continue;
+
+            const id = item.identifier ?? item.token_id ?? item.tokenId;
             if (id != null) tokenIds.push(String(id));
           }
           next = data.next || null;
           pages += 1;
-        } while (next && pages < 5);
+        } while (next && pages < 6);
       } catch (err) {
-        matches.push(`❌ ${w.address.slice(0, 10)}... list NFTs failed: ${(err.message || '').slice(0, 60)}`);
-        continue;
+        debugOwned.push(`${w.address.slice(0, 10)}... NFT fetch err: ${(err.message || '').slice(0, 50)}`);
       }
 
       tokenIds = [...new Set(tokenIds)];
-      if (tokenIds.length === 0) continue;
+      ownedCount += tokenIds.length;
+      if (tokenIds.length > 0) {
+        debugOwned.push(`${w.address.slice(0, 10)}... owns ${tokenIds.length} token(s)`);
+      }
 
-      for (const tokenId of tokenIds.slice(0, 30)) { // safety cap per wallet
+      for (const tokenId of tokenIds.slice(0, 40)) {
+        offerChecked += 1;
+        let offer = null;
+
+        // 2) best offer
         try {
           const best = await openseaFetch(
             `/offers/collection/${encodeURIComponent(slug)}/nfts/${encodeURIComponent(tokenId)}/best`
           );
-          const offer = best?.offer || best;
-          if (!offer) continue;
-
-          const parsed = offerPriceToNativeAndUsd(offer);
-          if (!parsed) continue;
-
-          let usd = parsed.usd;
-          if (usd == null && ethUsd && (parsed.currency === 'ETH' || parsed.currency === 'WETH')) {
-            usd = parsed.native * ethUsd;
-          }
-
-          // filter min/max
-          if (minPrice) {
-            if (minPrice.kind === 'usd') {
-              if (usd == null || usd < minPrice.value) continue;
-            } else if (parsed.native < minPrice.value) continue;
-          }
-          if (maxPrice) {
-            if (maxPrice.kind === 'usd') {
-              if (usd == null || usd > maxPrice.value) continue;
-            } else if (parsed.native > maxPrice.value) continue;
-          }
-
-          const priceTxt =
-            usd != null
-              ? `${parsed.native.toFixed(5)} ${parsed.currency} (≈ $${usd.toFixed(2)})`
-              : `${parsed.native.toFixed(5)} ${parsed.currency}`;
-
-          matches.push(
-            `✅ ${w.address.slice(0, 10)}... #${tokenId} → <b>${priceTxt}</b>`
-          );
+          offer = best?.offer || best;
         } catch {
-          // no best offer / 404 — skip
+          // try full offers list
+          try {
+            const all = await openseaFetch(
+              `/offers/collection/${encodeURIComponent(slug)}/nfts/${encodeURIComponent(tokenId)}?limit=5`
+            );
+            const list = all?.offers || [];
+            offer = list[0] || null;
+          } catch {
+            offer = null;
+          }
         }
+
+        if (!offer || offer.status && String(offer.status).toUpperCase() === 'INACTIVE') {
+          continue;
+        }
+        offerFound += 1;
+
+        const parsed = offerPriceToNativeAndUsd(offer);
+        if (!parsed) {
+          filteredOut += 1;
+          continue;
+        }
+
+        let usd = parsed.usd;
+        if (usd == null && ethUsd && ['ETH', 'WETH'].includes(parsed.currency)) {
+          usd = parsed.native * ethUsd;
+        }
+
+        let pass = true;
+        if (minPrice) {
+          if (minPrice.kind === 'usd') {
+            if (usd == null || usd < minPrice.value) pass = false;
+          } else if (parsed.native < minPrice.value) pass = false;
+        }
+        if (pass && maxPrice) {
+          if (maxPrice.kind === 'usd') {
+            if (usd == null || usd > maxPrice.value) pass = false;
+          } else if (parsed.native > maxPrice.value) pass = false;
+        }
+
+        if (!pass) {
+          filteredOut += 1;
+          continue;
+        }
+
+        const priceTxt =
+          usd != null
+            ? `${parsed.native.toFixed(5)} ${parsed.currency} (≈ $${usd.toFixed(2)})`
+            : `${parsed.native.toFixed(5)} ${parsed.currency}`;
+
+        matches.push(`✅ ${w.address.slice(0, 10)}... #${tokenId} → <b>${priceTxt}</b>`);
       }
     }
 
+    const debug =
+      `Slug: <code>${escapeHtml(slug)}</code>\n` +
+      `Owned tokens found: <b>${ownedCount}</b>\n` +
+      `Offers checked: <b>${offerChecked}</b>\n` +
+      `Offers found: <b>${offerFound}</b>\n` +
+      `Filtered by price: <b>${filteredOut}</b>\n` +
+      (debugOwned.length ? `\n${debugOwned.slice(0, 12).join('\n')}` : '');
+
     if (matches.length === 0) {
       return ctx.reply(
-        `ℹ️ No matching offers found.\n` +
-        `Collection: <code>${escapeHtml(slug)}</code>`,
+        `ℹ️ No matching offers.\n\n${debug}\n\n` +
+        `Tips:\n` +
+        `• Confirm wallets actually own this collection on OpenSea\n` +
+        `• Try min <code>$0</code> and max <code>none</code>\n` +
+        `• Confirm chain is correct (rh/eth/ink/arc)`,
         { parse_mode: 'HTML' }
       );
     }
@@ -767,12 +820,10 @@ async function runListOffers(ctx, chainKey, contractAddress, minPrice, maxPrice)
     const header =
       `📋 <b>Offers</b> (${label})\n` +
       `Collection: <code>${escapeHtml(slug)}</code>\n` +
-      `Contract: <code>${escapeHtml(contractAddress)}</code>\n` +
       `Matches: <b>${matches.length}</b>\n\n`;
 
-    // Telegram message length limit safety
-    const body = matches.slice(0, 40).join('\n');
-    await ctx.reply(header + body, { parse_mode: 'HTML' });
+    await ctx.reply(header + matches.slice(0, 40).join('\n'), { parse_mode: 'HTML' });
+    await ctx.reply(`🧾 Debug\n${debug}`, { parse_mode: 'HTML' });
   } catch (err) {
     await ctx.reply(`❌ Offers scan failed: ${err.message}`);
   }
