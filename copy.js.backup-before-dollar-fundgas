@@ -450,40 +450,6 @@ function getChainRpcPool(chainKey) {
   };
 }
 
-async function getEthPriceUsd() {
-  // Free public price feed (no key)
-  const url = 'https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd';
-  const res = await fetchWithTimeout(url, {}, 8000);
-  if (!res.ok) throw new Error(`Price API HTTP ${res.status}`);
-  const data = await res.json();
-  const price = Number(data?.ethereum?.usd);
-  if (!Number.isFinite(price) || price <= 0) throw new Error('Invalid ETH price');
-  return price;
-}
-
-function parseFundAmount(amountStr, chainKey) {
-  const raw = String(amountStr || '').trim().toLowerCase();
-  if (!raw) throw new Error('empty');
-
-  // $3 / 3$ / 3usd / usd3
-  const usdMatch =
-    raw.match(/^\$\s*([0-9]*\.?[0-9]+)$/) ||
-    raw.match(/^([0-9]*\.?[0-9]+)\s*\$$/) ||
-    raw.match(/^([0-9]*\.?[0-9]+)\s*usd$/) ||
-    raw.match(/^usd\s*([0-9]*\.?[0-9]+)$/);
-
-  if (usdMatch) {
-    const usd = Number(usdMatch[1]);
-    if (!Number.isFinite(usd) || usd <= 0) throw new Error('bad usd');
-    return { type: 'usd', usd };
-  }
-
-  // plain number = native token amount (ETH or USDC on Arc)
-  const native = Number(raw);
-  if (!Number.isFinite(native) || native <= 0) throw new Error('bad amount');
-  return { type: 'native', amount: native };
-}
-
 function parseChainKey(text) {
   const t = String(text || '').trim().toLowerCase();
   if (t === 'rh' || t === 'robinhood') return 'rh';
@@ -502,54 +468,19 @@ async function runFundGas(ctx, amountStr, chainKey = 'rh') {
       return ctx.reply('❌ No minting wallets loaded.');
     }
 
-    const { pool, label } = getChainRpcPool(chainKey);
-    const isArc = String(chainKey).toLowerCase() === 'arc';
-    const tokenName = isArc ? 'USDC' : 'ETH';
-
-    let amountEth; // native amount to send (ETH or USDC units)
-    let usdNote = '';
-
+    let amountEth;
     try {
-      const parsed = parseFundAmount(amountStr, chainKey);
-
-      if (parsed.type === 'usd') {
-        if (isArc) {
-          // Arc native gas token is USDC ≈ $1
-          amountEth = parsed.usd;
-          usdNote = ` (≈ $${parsed.usd} USDC)`;
-        } else {
-          const ethPrice = await getEthPriceUsd();
-          amountEth = parsed.usd / ethPrice;
-          usdNote = ` ($${parsed.usd} ≈ ${amountEth.toFixed(6)} ETH @ $${ethPrice.toFixed(2)})`;
-        }
-      } else {
-        amountEth = parsed.amount;
-      }
-
+      amountEth = Number(amountStr);
       if (!Number.isFinite(amountEth) || amountEth <= 0) throw new Error('bad amount');
-    } catch (err) {
-      return ctx.reply(
-        '❌ Invalid amount.\n\n' +
-        'Examples:\n' +
-        '• <code>0.002</code> (native)\n' +
-        '• <code>$3</code> (dollars)\n' +
-        '• <code>3usd</code>\n\n' +
-        `Error: ${escapeHtml(err.message)}`,
-        { parse_mode: 'HTML' }
-      );
-    }
-
-    // safety cap for accidental huge USD → ETH conversions
-    if (!isArc && amountEth > 0.2) {
-      return ctx.reply(
-        `❌ Amount too high for safety: <b>${amountEth.toFixed(6)} ETH</b>${usdNote}\n` +
-        `Max allowed per wallet: 0.2 ETH. Try a smaller $ amount.`,
-        { parse_mode: 'HTML' }
-      );
+    } catch {
+      return ctx.reply('❌ Invalid amount. Example: 0.002');
     }
 
     const amountWei = ethers.parseEther(String(amountEth));
     const totalNeeded = amountWei * BigInt(wallets.length);
+
+    const { pool, label } = getChainRpcPool(chainKey);
+    const tokenName = String(chainKey).toLowerCase() === 'arc' ? 'USDC' : 'ETH';
     const provider = pool.current();
     const funder = sponsorWallet.signer.connect(provider);
 
@@ -563,7 +494,7 @@ async function runFundGas(ctx, amountStr, chainKey = 'rh') {
     }
 
     await ctx.reply(
-      `⛽ Sending <b>${Number(amountEth).toFixed(6)}</b> ${tokenName} on <b>${label}</b> to <b>${wallets.length}</b> wallets...${usdNote}\n` +
+      `⛽ Sending <b>${amountEth}</b> ${tokenName} on <b>${label}</b> to <b>${wallets.length}</b> wallets...\n` +
       `From: <code>${escapeHtml(sponsorWallet.address.slice(0, 12))}...</code>`,
       { parse_mode: 'HTML' }
     );
@@ -1125,9 +1056,8 @@ bot.on('text', async (ctx, next) => {
       pendingFundGas = { step: 'amount', chain: chainKey };
       const tokenName = chainKey === 'arc' ? 'USDC' : 'ETH';
       return ctx.reply(
-        `⛽ Step 2/2 — Amount for <b>each</b> wallet on <b>${chainKey}</b>.\n\n` +
-        `Native ${tokenName}: <code>0.002</code>\n` +
-        `Or dollars: <code>$3</code> / <code>3usd</code>`,
+        `⛽ Step 2/2 — Send amount of <b>${tokenName}</b> for <b>each</b> wallet.\n\n` +
+        `Example: <code>0.002</code>`,
         { parse_mode: 'HTML' }
       );
     }
@@ -1316,12 +1246,9 @@ bot.command('fundgas', async (ctx) => {
   if (!amountStr) {
     pendingFundGas = { step: 'chain' };
     return ctx.reply(
-      'Usage:\n' +
-      '<code>/fundgas 0.002 rh</code>\n' +
-      '<code>/fundgas $3 eth</code>\n' +
-      '<code>/fundgas 5usd arc</code>\n\n' +
+      'Usage: <code>/fundgas 0.002 arc</code>\n' +
       'Chains: <code>rh</code> / <code>eth</code> / <code>ink</code> / <code>arc</code>\n' +
-      'On Arc, $ amounts are treated as USDC (~$1 each)',
+      'Note: on Arc amount is native USDC',
       { parse_mode: 'HTML' }
     );
   }
