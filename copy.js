@@ -745,7 +745,6 @@ async function runAcceptOffers(ctx, payload) {
           continue;
         }
 
-        // OpenSea fulfillment data for accepting an offer (seller side)
         const body = {
           offer: {
             hash: m.orderHash,
@@ -761,33 +760,80 @@ async function runAcceptOffers(ctx, payload) {
           },
         };
 
-        const fulfill = await openseaFetch('/offers/fulfillment_data', {
-          method: 'POST',
-          body,
-        });
+        let fulfill;
+        try {
+          fulfill = await openseaFetch('/offers/fulfillment_data', {
+            method: 'POST',
+            body,
+          });
+        } catch (e1) {
+          // fallback endpoint used by some OpenSea versions
+          try {
+            fulfill = await openseaFetch('/offers/fulfillment/actions', {
+              method: 'POST',
+              body,
+            });
+          } catch (e2) {
+            throw new Error(
+              `fulfillment_data: ${(e1.message || '').slice(0, 80)} | actions: ${(e2.message || '').slice(0, 80)}`
+            );
+          }
+        }
 
-        // Response shapes vary; try common paths
-        const txData =
-          fulfill?.fulfillment_data?.transaction ||
-          fulfill?.transaction ||
-          fulfill?.actions?.[0]?.transaction ||
-          null;
+        // Dig out a sendable EVM transaction from several possible OpenSea shapes
+        const candidates = [
+          fulfill?.fulfillment_data?.transaction,
+          fulfill?.fulfillment_data?.orders?.[0]?.transaction,
+          fulfill?.transaction,
+          fulfill?.actions?.find?.((a) => a?.transaction)?.transaction,
+          fulfill?.actions?.[0]?.transaction,
+          fulfill,
+        ].filter(Boolean);
 
-        const to =
-          txData?.to ||
-          txData?.target ||
-          fulfill?.to ||
-          m.protocolAddress;
-        const data =
-          txData?.data ||
-          txData?.input_data ||
-          txData?.calldata ||
-          fulfill?.data;
-        const value = BigInt(txData?.value || fulfill?.value || '0');
+        let to = null;
+        let data = null;
+        let value = 0n;
 
-        if (!to || !data) {
+        for (const c of candidates) {
+          const maybeTo = c.to || c.target || c.contract_address || null;
+          const maybeData =
+            c.data ||
+            c.input_data ||
+            c.calldata ||
+            c.input ||
+            null;
+          const maybeValue = c.value ?? c.wei_value ?? '0';
+
+          if (maybeTo && typeof maybeData === 'string' && maybeData.startsWith('0x')) {
+            to = maybeTo;
+            data = maybeData;
+            try {
+              value = BigInt(maybeValue || '0');
+            } catch {
+              value = 0n;
+            }
+            break;
+          }
+        }
+
+        // Some responses put calldata under seaport function call fields
+        if (!data) {
+          const fd = fulfill?.fulfillment_data || fulfill;
+          const raw =
+            fd?.transaction?.data ||
+            fd?.calldata ||
+            fd?.input_data ||
+            null;
+          if (typeof raw === 'string' && raw.startsWith('0x')) {
+            data = raw;
+            to = to || fd?.transaction?.to || m.protocolAddress;
+          }
+        }
+
+        if (!to || !data || typeof data !== 'string' || !data.startsWith('0x')) {
+          const preview = JSON.stringify(fulfill).slice(0, 180);
           results.push(
-            `❌ ${m.wallet.address.slice(0, 10)}... #${m.tokenId} no fulfillment tx data`
+            `❌ ${m.wallet.address.slice(0, 10)}... #${m.tokenId} bad fulfillment data: ${preview}`
           );
           continue;
         }
