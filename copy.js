@@ -626,30 +626,93 @@ function parsePriceInput(str) {
 }
 
 function offerPriceToNativeAndUsd(offer) {
-  // OpenSea offer price shapes vary; handle common ones
-  const price = offer?.price || {};
-  const value = price.value ?? price.current_price ?? offer?.current_price;
-  const decimals = Number(price.decimals ?? 18);
-  const currency = (price.currency || price.payment_token?.symbol || 'ETH').toUpperCase();
+  if (!offer || typeof offer !== 'object') return null;
 
-  if (value === undefined || value === null) return null;
+  const price = offer.price || offer.current_price || {};
+  const currency = String(
+    price.currency ||
+    price.payment_token?.symbol ||
+    offer.payment_token?.symbol ||
+    'ETH'
+  ).toUpperCase();
 
-  let native = Number(value);
-  // if value looks like wei string
-  if (typeof value === 'string' && value.length > 8 && /^\d+$/.test(value)) {
-    native = Number(ethers.formatUnits(value, decimals));
-  } else if (typeof value === 'number' && value > 1e12) {
-    native = Number(ethers.formatUnits(BigInt(Math.floor(value)), decimals));
+  const decimals = Number(
+    price.decimals ??
+    price.payment_token?.decimals ??
+    offer.payment_token?.decimals ??
+    18
+  );
+
+  // Common OpenSea shapes
+  let raw =
+    price.value ??
+    price.current_price ??
+    price.amount ??
+    offer.current_price ??
+    offer.amount ??
+    null;
+
+  // Sometimes nested as { value: { raw/value } }
+  if (raw && typeof raw === 'object') {
+    raw = raw.raw ?? raw.value ?? raw.amount ?? null;
   }
 
-  if (!Number.isFinite(native)) return null;
+  // Seaport protocol_data fallback (sum of offer item startAmounts is not ideal;
+  // for standard ETH/WETH offers, consideration often holds payment — skip if messy)
+  if (raw == null && offer.protocol_data?.parameters) {
+    const params = offer.protocol_data.parameters;
+    const consideration = params.consideration || [];
+    // For an offer, the buyer offers payment tokens in "offer" array
+    const offerItems = params.offer || [];
+    const paymentItem =
+      offerItems.find((i) => String(i.itemType) === '1' || i.itemType === 1) ||
+      offerItems[0];
+    if (paymentItem?.startAmount) raw = paymentItem.startAmount;
+  }
+
+  if (raw == null) return null;
+
+  let native = NaN;
+  if (typeof raw === 'string') {
+    if (/^\d+$/.test(raw)) {
+      // integer wei-like
+      try {
+        native = Number(ethers.formatUnits(raw, decimals));
+      } catch {
+        native = Number(raw);
+      }
+    } else {
+      native = Number(raw);
+    }
+  } else if (typeof raw === 'number') {
+    // large number likely wei
+    if (raw > 1e10) {
+      try {
+        native = Number(ethers.formatUnits(BigInt(Math.trunc(raw)), decimals));
+      } catch {
+        native = raw;
+      }
+    } else {
+      native = raw;
+    }
+  } else if (typeof raw === 'bigint') {
+    native = Number(ethers.formatUnits(raw, decimals));
+  }
+
+  if (!Number.isFinite(native) || native < 0) return null;
 
   const usd =
     price.usd != null ? Number(price.usd) :
     price.value_usd != null ? Number(price.value_usd) :
+    offer.price?.usd != null ? Number(offer.price.usd) :
     null;
 
-  return { native, usd, currency };
+  return {
+    native,
+    usd: Number.isFinite(usd) ? usd : null,
+    currency,
+    raw: String(raw),
+  };
 }
 
 async function runListOffers(ctx, chainKey, contractAddress, minPrice, maxPrice) {
@@ -764,6 +827,10 @@ async function runListOffers(ctx, chainKey, contractAddress, minPrice, maxPrice)
         const parsed = offerPriceToNativeAndUsd(offer);
         if (!parsed) {
           filteredOut += 1;
+          const rawPrice = JSON.stringify(offer.price || offer.current_price || {}).slice(0, 120);
+          matches.push(
+            `⚠️ ${w.address.slice(0, 10)}... #${tokenId} has offer but price parse failed: <code>${escapeHtml(rawPrice)}</code>`
+          );
           continue;
         }
 
