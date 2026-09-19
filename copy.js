@@ -325,6 +325,7 @@ let isArcPaused = false;
 let pendingFundGas = null;   // null | { step, chain? }
 let pendingCollect = null;   // null | { step, chain?, contract?, to? }
 let pendingOffers = null;    // null | { step, chain?, contract?, min? }
+let pendingAcceptOffers = null; // null | { matches: [...], chainKey, contract }
 
 // ===== Stats + already-minted protection =====
 // Track successful mints per contract+wallet so failed wallets can retry later
@@ -715,6 +716,109 @@ function offerPriceToNativeAndUsd(offer) {
   };
 }
 
+function openseaChainName(chainKey) {
+  const k = String(chainKey || '').toLowerCase();
+  if (k === 'eth' || k === 'ethereum') return 'ethereum';
+  if (k === 'ink') return 'ink';
+  if (k === 'arc') return 'arc';
+  return 'robinhood';
+}
+
+async function runAcceptOffers(ctx, payload) {
+  try {
+    const { matches, chainKey, contract, slug } = payload;
+    const { pool, label } = getChainRpcPool(chainKey);
+    const provider = pool.current();
+    const chainName = openseaChainName(chainKey);
+    const results = [];
+
+    await ctx.reply(
+      `💸 Accepting <b>${matches.length}</b> offer(s) on <b>${label}</b>...\n` +
+      `Collection: <code>${escapeHtml(slug)}</code>`,
+      { parse_mode: 'HTML' }
+    );
+
+    for (const m of matches) {
+      try {
+        if (!m.orderHash) {
+          results.push(`❌ #${m.tokenId} missing order hash`);
+          continue;
+        }
+
+        // OpenSea fulfillment data for accepting an offer (seller side)
+        const body = {
+          offer: {
+            hash: m.orderHash,
+            chain: chainName,
+            protocol_address: m.protocolAddress,
+          },
+          fulfiller: {
+            address: m.wallet.address,
+          },
+          consideration: {
+            asset_contract_address: contract,
+            token_id: m.tokenId,
+          },
+        };
+
+        const fulfill = await openseaFetch('/offers/fulfillment_data', {
+          method: 'POST',
+          body,
+        });
+
+        // Response shapes vary; try common paths
+        const txData =
+          fulfill?.fulfillment_data?.transaction ||
+          fulfill?.transaction ||
+          fulfill?.actions?.[0]?.transaction ||
+          null;
+
+        const to =
+          txData?.to ||
+          txData?.target ||
+          fulfill?.to ||
+          m.protocolAddress;
+        const data =
+          txData?.data ||
+          txData?.input_data ||
+          txData?.calldata ||
+          fulfill?.data;
+        const value = BigInt(txData?.value || fulfill?.value || '0');
+
+        if (!to || !data) {
+          results.push(
+            `❌ ${m.wallet.address.slice(0, 10)}... #${m.tokenId} no fulfillment tx data`
+          );
+          continue;
+        }
+
+        const signer = m.wallet.signer.connect(provider);
+        const tx = await signer.sendTransaction({ to, data, value });
+        const receipt = await tx.wait();
+
+        if (receipt.status === 1) {
+          results.push(
+            `✅ ${m.wallet.address.slice(0, 10)}... #${m.tokenId} accepted | ${tx.hash.slice(0, 12)}...`
+          );
+        } else {
+          results.push(`❌ ${m.wallet.address.slice(0, 10)}... #${m.tokenId} reverted`);
+        }
+      } catch (err) {
+        results.push(
+          `❌ ${m.wallet?.address?.slice(0, 10) || '?'}... #${m.tokenId} → ${(err.message || 'failed').slice(0, 80)}`
+        );
+      }
+    }
+
+    await ctx.reply(
+      `💸 <b>Accept result</b> (${label})\n\n` + results.join('\n'),
+      { parse_mode: 'HTML' }
+    );
+  } catch (err) {
+    await ctx.reply(`❌ Accept failed: ${err.message}`);
+  }
+}
+
 async function runListOffers(ctx, chainKey, contractAddress, minPrice, maxPrice) {
   try {
     if (!wallets || wallets.length === 0) {
@@ -828,9 +932,13 @@ async function runListOffers(ctx, chainKey, contractAddress, minPrice, maxPrice)
         if (!parsed) {
           filteredOut += 1;
           const rawPrice = JSON.stringify(offer.price || offer.current_price || {}).slice(0, 120);
-          matches.push(
-            `⚠️ ${w.address.slice(0, 10)}... #${tokenId} has offer but price parse failed: <code>${escapeHtml(rawPrice)}</code>`
-          );
+          // string-only debug row (not acceptable)
+          matches.push({
+            line: `⚠️ ${w.address.slice(0, 10)}... #${tokenId} price parse failed: <code>${escapeHtml(rawPrice)}</code>`,
+            wallet: null,
+            tokenId: String(tokenId),
+            orderHash: null,
+          });
           continue;
         }
 
@@ -861,7 +969,25 @@ async function runListOffers(ctx, chainKey, contractAddress, minPrice, maxPrice)
             ? `${parsed.native.toFixed(5)} ${parsed.currency} (≈ $${usd.toFixed(2)})`
             : `${parsed.native.toFixed(5)} ${parsed.currency}`;
 
-        matches.push(`✅ ${w.address.slice(0, 10)}... #${tokenId} → <b>${priceTxt}</b>`);
+        const orderHash =
+          offer.order_hash ||
+          offer.orderHash ||
+          offer.hash ||
+          null;
+        const protocolAddress =
+          offer.protocol_address ||
+          offer.protocolAddress ||
+          '0x0000000000000068F116a894984e2DB1123eB395';
+
+        matches.push({
+          line: `✅ ${w.address.slice(0, 10)}... #${tokenId} → <b>${priceTxt}</b>`,
+          wallet: w,
+          tokenId: String(tokenId),
+          orderHash,
+          protocolAddress,
+          priceTxt,
+          slug,
+        });
       }
     }
 
@@ -877,20 +1003,38 @@ async function runListOffers(ctx, chainKey, contractAddress, minPrice, maxPrice)
       return ctx.reply(
         `ℹ️ No matching offers.\n\n${debug}\n\n` +
         `Tips:\n` +
-        `• Confirm wallets actually own this collection on OpenSea\n` +
-        `• Try min <code>$0</code> and max <code>none</code>\n` +
-        `• Confirm chain is correct (rh/eth/ink/arc)`,
+        `• Confirm wallets own this collection on OpenSea\n` +
+        `• Try min <code>$0</code> and max <code>none</code>`,
         { parse_mode: 'HTML' }
       );
     }
 
+    const lines = matches.map((m) => m.line).slice(0, 40).join('\n');
     const header =
       `📋 <b>Offers</b> (${label})\n` +
       `Collection: <code>${escapeHtml(slug)}</code>\n` +
       `Matches: <b>${matches.length}</b>\n\n`;
 
-    await ctx.reply(header + matches.slice(0, 40).join('\n'), { parse_mode: 'HTML' });
+    await ctx.reply(header + lines, { parse_mode: 'HTML' });
     await ctx.reply(`🧾 Debug\n${debug}`, { parse_mode: 'HTML' });
+
+    const acceptable = matches.filter((m) => m.wallet && m.orderHash);
+    if (acceptable.length === 0) {
+      return ctx.reply('No offers can be accepted automatically (missing order hash).');
+    }
+
+    pendingAcceptOffers = {
+      matches: acceptable,
+      chainKey,
+      contract: contractAddress,
+      slug,
+    };
+
+    await ctx.reply(
+      `💸 Accept <b>${acceptable.length}</b> offer(s)?\n\n` +
+      `Type <code>yes</code> to accept, or <code>no</code> to cancel.`,
+      { parse_mode: 'HTML' }
+    );
   } catch (err) {
     await ctx.reply(`❌ Offers scan failed: ${err.message}`);
   }
@@ -1413,7 +1557,7 @@ bot.on('text', async (ctx, next) => {
 
   
   // If no interactive flow is active, do not block other handlers
-  if (!pendingFundGas && !pendingCollect && !pendingOffers) {
+  if (!pendingFundGas && !pendingCollect && !pendingOffers && !pendingAcceptOffers) {
     return next();
   }
 
@@ -1421,7 +1565,26 @@ bot.on('text', async (ctx, next) => {
     pendingFundGas = null;
     pendingCollect = null;
     pendingOffers = null;
+    pendingAcceptOffers = null;
     return ctx.reply('Cancelled.');
+  }
+
+  // Accept offers confirmation
+  if (pendingAcceptOffers) {
+    const ans = text.toLowerCase();
+    if (ans === 'no' || ans === 'n') {
+      pendingAcceptOffers = null;
+      return ctx.reply('Cancelled offer accept.');
+    }
+    if (ans === 'yes' || ans === 'y') {
+      const payload = pendingAcceptOffers;
+      pendingAcceptOffers = null;
+      await runAcceptOffers(ctx, payload);
+      return;
+    }
+    return ctx.reply('Type <code>yes</code> to accept or <code>no</code> to cancel.', {
+      parse_mode: 'HTML',
+    });
   }
 
   // Fund gas flow: chain → amount
