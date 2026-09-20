@@ -326,7 +326,6 @@ let pendingFundGas = null;   // null | { step, chain? }
 let pendingCollect = null;   // null | { step, chain?, contract?, to? }
 let pendingOffers = null;    // null | { step, chain?, contract?, min? }
 let pendingAcceptOffers = null; // null | { matches: [...], chainKey, contract }
-let pendingSchedule = null;     // null | { step, chain? }
 
 // ===== Stats + already-minted protection =====
 // Track successful mints per contract+wallet so failed wallets can retry later
@@ -866,132 +865,6 @@ async function runAcceptOffers(ctx, payload) {
   }
 }
 
-function formatUtc(ts) {
-  if (!ts) return 'unknown';
-  try {
-    const d = new Date(ts);
-    if (Number.isNaN(d.getTime())) return String(ts);
-    return d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
-  } catch {
-    return String(ts);
-  }
-}
-
-function formatStagePrice(priceRaw) {
-  if (priceRaw == null || priceRaw === '') return 'unknown';
-  try {
-    // often wei string
-    if (typeof priceRaw === 'string' && /^\d+$/.test(priceRaw)) {
-      return `${ethers.formatEther(priceRaw)} ETH`;
-    }
-    if (typeof priceRaw === 'object') {
-      const v = priceRaw.value ?? priceRaw.amount ?? priceRaw.unit;
-      if (v != null && /^\d+$/.test(String(v))) return `${ethers.formatEther(String(v))} ETH`;
-      return JSON.stringify(priceRaw).slice(0, 40);
-    }
-    return String(priceRaw);
-  } catch {
-    return String(priceRaw);
-  }
-}
-
-async function runInspectDrop(ctx, chainKey, contractAddress) {
-  try {
-    if (!ethers.isAddress(contractAddress)) {
-      return ctx.reply('❌ Invalid contract address.');
-    }
-
-    const { label, openseaSlug } = getChainRpcPool(chainKey);
-
-    await ctx.reply(
-      `📅 Inspecting drop on <b>${label}</b>\n` +
-      `Contract: <code>${escapeHtml(contractAddress)}</code>\n` +
-      `Please wait...`,
-      { parse_mode: 'HTML' }
-    );
-
-    let slug;
-    try {
-      slug = await resolveCollectionSlug(contractAddress, openseaSlug);
-    } catch (err) {
-      return ctx.reply(`❌ OpenSea lookup failed: ${err.message}`);
-    }
-    if (!slug) return ctx.reply('❌ No OpenSea collection found for that contract.');
-
-    let drop;
-    try {
-      drop = await openseaFetch(`/drops/${encodeURIComponent(slug)}`);
-    } catch (err) {
-      return ctx.reply(
-        `❌ Not an OpenSea Drop (or stages unavailable).\n` +
-        `Slug: <code>${escapeHtml(slug)}</code>\n` +
-        `Error: ${escapeHtml(err.message)}`,
-        { parse_mode: 'HTML' }
-      );
-    }
-
-    const stages = drop.stages || drop.mint_stages || [];
-    if (!Array.isArray(stages) || stages.length === 0) {
-      return ctx.reply(
-        `ℹ️ Drop found but no stages listed.\nSlug: <code>${escapeHtml(slug)}</code>`,
-        { parse_mode: 'HTML' }
-      );
-    }
-
-    let msg =
-      `📅 <b>Drop inspect</b> (${label})\n` +
-      `Name: <b>${escapeHtml(drop.collection_name || drop.name || slug)}</b>\n` +
-      `Slug: <code>${escapeHtml(slug)}</code>\n` +
-      `Minting now: <b>${drop.is_minting ? 'yes' : 'no'}</b>\n` +
-      `Stages: <b>${stages.length}</b>\n\n`;
-
-    stages.forEach((s, i) => {
-      const labelS = s.label || s.stage_type || s.name || `Stage ${i + 1}`;
-      const start = s.start_time || s.startTime || s.starts_at;
-      const end = s.end_time || s.endTime || s.ends_at;
-      const price = formatStagePrice(s.price ?? s.mint_price);
-      const maxW =
-        s.max_total_mintable_by_wallet ||
-        s.maxPerWallet ||
-        s.max_per_wallet ||
-        s.max_mint_per_wallet ||
-        '?';
-      msg +=
-        `<b>${i + 1}. ${escapeHtml(String(labelS))}</b>\n` +
-        `Type: <code>${escapeHtml(String(s.stage_type || s.type || '?'))}</code>\n` +
-        `Start: <code>${escapeHtml(formatUtc(start))}</code>\n` +
-        `End: <code>${escapeHtml(formatUtc(end))}</code>\n` +
-        `Price: <b>${escapeHtml(price)}</b>\n` +
-        `Max/wallet: <b>${escapeHtml(String(maxW))}</b>\n\n`;
-    });
-
-    // Best-effort eligibility: which wallets can build a mint tx right now
-    const mintWallets = wallets || [];
-    if (mintWallets.length > 0) {
-      msg += `🔎 <b>Eligibility probe</b> (OpenSea mint build, qty=1)\n`;
-      let ok = 0;
-      for (const w of mintWallets) {
-        try {
-          await buildDropMintTransaction(slug, w.address, 1);
-          ok += 1;
-          msg += `✅ ${w.address.slice(0, 10)}...\n`;
-        } catch (err) {
-          const short = cleanOpenSeaError(err.message || 'fail').slice(0, 50);
-          msg += `❌ ${w.address.slice(0, 10)}... ${escapeHtml(short)}\n`;
-        }
-      }
-      msg += `\nEligible now: <b>${ok}/${mintWallets.length}</b>\n`;
-      msg += `<i>Note: allowlist stages may show ineligible until that stage is live.</i>\n`;
-    }
-
-    msg += `\nPhase A only — arming comes next.`;
-
-    await ctx.reply(msg, { parse_mode: 'HTML' });
-  } catch (err) {
-    await ctx.reply(`❌ Inspect failed: ${err.message}`);
-  }
-}
-
 async function runListOffers(ctx, chainKey, contractAddress, minPrice, maxPrice) {
   try {
     if (!wallets || wallets.length === 0) {
@@ -1367,7 +1240,7 @@ const mainMenu = Markup.keyboard([
   ['⏸ Pause ARC', '▶️ Resume ARC'],
   ['🎯 Sponsor ON', '🎯 Sponsor OFF'],
   ['⛽ Fund Gas', '📦 Collect NFTs'],
-  ['💸 Offers', '📅 Schedule Mint'],
+  ['💸 Offers'],
   ['⏸ Pause All', '▶️ Resume All'],
   ['ℹ️ Help']
 ]).resize();
@@ -1599,22 +1472,6 @@ bot.hears('⛽ Fund Gas', async (ctx) => {
   );
 });
 
-bot.hears('📅 Schedule Mint', async (ctx) => {
-  if (!isAuthorizedChat(ctx)) return;
-  pendingSchedule = { step: 'chain' };
-  pendingFundGas = null;
-  pendingCollect = null;
-  pendingOffers = null;
-  pendingAcceptOffers = null;
-  await ctx.reply(
-    '📅 <b>Schedule Mint</b> (inspect)\n\n' +
-    'Step 1/2 — Chain:\n' +
-    '<code>rh</code> / <code>eth</code> / <code>ink</code> / <code>arc</code>\n\n' +
-    'Or <code>cancel</code>.',
-    { parse_mode: 'HTML' }
-  );
-});
-
 bot.hears('💸 Offers', async (ctx) => {
   if (!isAuthorizedChat(ctx)) return;
   pendingOffers = { step: 'chain' };
@@ -1739,15 +1596,14 @@ bot.on('text', async (ctx, next) => {
     text.startsWith('🟧') ||
     text.startsWith('👛') ||
     text.startsWith('ℹ️') ||
-    text.startsWith('💸') ||
-    text.startsWith('📅')
+    text.startsWith('💸')
   ) {
     return next();
   }
 
   
   // If no interactive flow is active, do not block other handlers
-  if (!pendingFundGas && !pendingCollect && !pendingOffers && !pendingAcceptOffers && !pendingSchedule) {
+  if (!pendingFundGas && !pendingCollect && !pendingOffers && !pendingAcceptOffers) {
     return next();
   }
 
@@ -1756,7 +1612,6 @@ bot.on('text', async (ctx, next) => {
     pendingCollect = null;
     pendingOffers = null;
     pendingAcceptOffers = null;
-    pendingSchedule = null;
     return ctx.reply('Cancelled.');
   }
 
@@ -1799,25 +1654,6 @@ bot.on('text', async (ctx, next) => {
       const chainKey = pendingFundGas.chain || 'rh';
       pendingFundGas = null;
       await runFundGas(ctx, text, chainKey);
-      return;
-    }
-  }
-
-    // Schedule inspect: chain → contract
-  if (pendingSchedule) {
-    if (pendingSchedule.step === 'chain') {
-      const chainKey = parseChainKey(text);
-      if (!chainKey) return ctx.reply('❌ Invalid chain. Use: rh / eth / ink / arc');
-      pendingSchedule = { step: 'contract', chain: chainKey };
-      return ctx.reply('📅 Step 2/2 — Send the collection <b>contract address</b>.', {
-        parse_mode: 'HTML',
-      });
-    }
-    if (pendingSchedule.step === 'contract') {
-      if (!ethers.isAddress(text)) return ctx.reply('❌ Invalid contract address.');
-      const chainKey = pendingSchedule.chain;
-      pendingSchedule = null;
-      await runInspectDrop(ctx, chainKey, text);
       return;
     }
   }
