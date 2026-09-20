@@ -326,7 +326,8 @@ let pendingFundGas = null;   // null | { step, chain? }
 let pendingCollect = null;   // null | { step, chain?, contract?, to? }
 let pendingOffers = null;    // null | { step, chain?, contract?, min? }
 let pendingAcceptOffers = null; // null | { matches: [...], chainKey, contract }
-let pendingSchedule = null;     // null | { step, chain? }
+let pendingSchedule = null; // interactive flow
+let armedMints = [];        // { id, chainKey, slug, contract, stage, qty, fireAt, timer }
 
 // ===== Stats + already-minted protection =====
 // Track successful mints per contract+wallet so failed wallets can retry later
@@ -895,6 +896,100 @@ function formatStagePrice(priceRaw) {
   }
 }
 
+function parseStageStartMs(stage) {
+  const start = stage?.start_time || stage?.startTime || stage?.starts_at;
+  if (!start) return null;
+  const ms = new Date(start).getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
+
+async function fireArmedMint(job) {
+  try {
+    await notify(
+      `🚀 <b>Armed mint firing</b>\n` +
+      `Slug: <code>${escapeHtml(job.slug)}</code>\n` +
+      `Stage: <b>${escapeHtml(job.stageLabel)}</b>\n` +
+      `Qty: <b>${job.qty}</b>\n` +
+      `Wallets: <b>${(wallets || []).length}</b>`
+    );
+
+    if (!wallets || wallets.length === 0) {
+      await notify('❌ No minting wallets configured');
+      return;
+    }
+
+    const { pool } = getChainRpcPool(job.chainKey);
+    const provider = pool.current();
+    const results = [];
+    let success = 0;
+
+    // Sequential mint
+    for (const w of wallets) {
+      try {
+        const raw = await buildDropMintTransaction(job.slug, w.address, job.qty);
+        const { to, data, value } = readMintTxFields(raw);
+        if (!to || !data) {
+          results.push(`❌ ${w.address.slice(0, 10)}... invalid tx data`);
+          continue;
+        }
+        const valueWei = BigInt(value || '0');
+        const signer = w.signer.connect(provider);
+        const tx = await signer.sendTransaction({ to, data, value: valueWei });
+        const receipt = await tx.wait();
+        if (receipt.status === 1) {
+          success += 1;
+          results.push(`✅ ${w.address.slice(0, 10)}... qty ${job.qty} | ${tx.hash.slice(0, 12)}...`);
+        } else {
+          results.push(`❌ ${w.address.slice(0, 10)}... reverted`);
+        }
+      } catch (err) {
+        results.push(
+          `❌ ${w.address.slice(0, 10)}... ${cleanOpenSeaError(err.message || 'fail').slice(0, 70)}`
+        );
+      }
+    }
+
+    await notify(
+      `📋 <b>Armed mint result</b>\n` +
+      `Success: <b>${success}/${wallets.length}</b>\n\n` +
+      results.join('\n')
+    );
+  } catch (err) {
+    await notify(`❌ Armed mint failed: ${err.message}`);
+  }
+}
+
+function armMintJob(ctx, job) {
+  const now = Date.now();
+  // wake a few seconds early so we're ready at stage start
+  const EARLY_MS = 5000;
+  let delay = (job.fireAt - EARLY_MS) - now;
+  if (delay < 0) delay = 0;
+
+  const id = `arm-${Date.now()}`;
+  const timer = setTimeout(async () => {
+    armedMints = armedMints.filter((j) => j.id !== id);
+    await fireArmedMint(job);
+  }, delay);
+
+  armedMints.push({ ...job, id, timer });
+
+  const fireUtc = new Date(job.fireAt).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
+  const inMin = Math.round(delay / 60000);
+
+  return ctx.reply(
+    `✅ <b>Armed</b>\n` +
+    `Slug: <code>${escapeHtml(job.slug)}</code>\n` +
+    `Stage: <b>${escapeHtml(job.stageLabel)}</b>\n` +
+    `Qty: <b>${job.qty}</b>\n` +
+    `Fire at: <code>${escapeHtml(fireUtc)}</code>\n` +
+    `Timer: ~<b>${inMin}</b> min (5s early)\n\n` +
+    `⚠️ Cleared if bot restarts.\n` +
+    `Type <code>disarm</code> to cancel all armed jobs.`,
+    { parse_mode: 'HTML' }
+  );
+}
+
 async function runInspectDrop(ctx, chainKey, contractAddress) {
   try {
     if (!ethers.isAddress(contractAddress)) {
@@ -984,10 +1079,21 @@ async function runInspectDrop(ctx, chainKey, contractAddress) {
       msg += `<i>Note: allowlist stages may show ineligible until that stage is live.</i>\n`;
     }
 
-    msg += `\nPhase A only — arming comes next.`;
+    msg += `\nReply with a <b>stage number</b> to arm (e.g. <code>1</code>), or <code>cancel</code>.`;
+
+    // Keep flow alive for stage selection
+    pendingSchedule = {
+      step: 'stage',
+      chain: chainKey,
+      contract: contractAddress,
+      slug,
+      stages,
+      label,
+    };
 
     await ctx.reply(msg, { parse_mode: 'HTML' });
   } catch (err) {
+    pendingSchedule = null;
     await ctx.reply(`❌ Inspect failed: ${err.message}`);
   }
 }
@@ -1803,23 +1909,84 @@ bot.on('text', async (ctx, next) => {
     }
   }
 
-    // Schedule inspect: chain → contract
+  // Schedule: chain → contract → stage → qty
   if (pendingSchedule) {
     if (pendingSchedule.step === 'chain') {
       const chainKey = parseChainKey(text);
       if (!chainKey) return ctx.reply('❌ Invalid chain. Use: rh / eth / ink / arc');
       pendingSchedule = { step: 'contract', chain: chainKey };
-      return ctx.reply('📅 Step 2/2 — Send the collection <b>contract address</b>.', {
+      return ctx.reply('📅 Step 2 — Send the collection <b>contract address</b>.', {
         parse_mode: 'HTML',
       });
     }
+
     if (pendingSchedule.step === 'contract') {
       if (!ethers.isAddress(text)) return ctx.reply('❌ Invalid contract address.');
       const chainKey = pendingSchedule.chain;
-      pendingSchedule = null;
+      // runInspectDrop will set pendingSchedule.step = 'stage'
       await runInspectDrop(ctx, chainKey, text);
       return;
     }
+
+    if (pendingSchedule.step === 'stage') {
+      const n = Number(text.trim());
+      const stages = pendingSchedule.stages || [];
+      if (!Number.isInteger(n) || n < 1 || n > stages.length) {
+        return ctx.reply(`❌ Reply with a stage number 1–${stages.length}`);
+      }
+      const stage = stages[n - 1];
+      const startMs = parseStageStartMs(stage);
+      pendingSchedule = {
+        ...pendingSchedule,
+        step: 'qty',
+        stageIndex: n - 1,
+        stage,
+        startMs,
+      };
+      return ctx.reply(
+        `📅 Stage <b>${n}</b> selected.\n` +
+        `Start: <code>${escapeHtml(formatUtc(stage.start_time || stage.startTime || stage.starts_at))}</code>\n\n` +
+        `Send mint <b>quantity</b> (e.g. <code>1</code>).`,
+        { parse_mode: 'HTML' }
+      );
+    }
+
+    if (pendingSchedule.step === 'qty') {
+      const qty = Number(text.trim());
+      if (!Number.isInteger(qty) || qty < 1 || qty > 100) {
+        return ctx.reply('❌ Quantity must be an integer 1–100');
+      }
+
+      const stage = pendingSchedule.stage;
+      const stageLabel = stage.label || stage.stage_type || stage.name || `Stage ${pendingSchedule.stageIndex + 1}`;
+      let fireAt = pendingSchedule.startMs;
+      if (!fireAt) {
+        // no start time → fire soon
+        fireAt = Date.now() + 3000;
+      }
+
+      const job = {
+        chainKey: pendingSchedule.chain,
+        slug: pendingSchedule.slug,
+        contract: pendingSchedule.contract,
+        stageLabel: String(stageLabel),
+        qty,
+        fireAt,
+      };
+
+      pendingSchedule = null;
+      await armMintJob(ctx, job);
+      return;
+    }
+  }
+
+  if (text.toLowerCase() === 'disarm') {
+    for (const j of armedMints) {
+      try { clearTimeout(j.timer); } catch {}
+    }
+    const n = armedMints.length;
+    armedMints = [];
+    return ctx.reply(`🛰 Disarmed <b>${n}</b> job(s).`, { parse_mode: 'HTML' });
   }
 
     // Offers flow: chain → contract → min → max
