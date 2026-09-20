@@ -1045,6 +1045,52 @@ async function armMintJob(ctx, job) {
   );
 }
 
+async function listArmedStatus(ctx) {
+  try {
+    const rows = await dbListArmedMints();
+    const live = armedMints.map((j) => j.id);
+
+    if (!rows.length && !armedMints.length) {
+      return ctx.reply('🛰 No armed mints.');
+    }
+
+    let msg = `🛰 <b>Armed mints</b>\n\n`;
+
+    for (const row of rows) {
+      const fireUtc = new Date(row.fire_at)
+        .toISOString()
+        .replace('T', ' ')
+        .replace(/\.\d+Z$/, ' UTC');
+      const inMem = live.includes(row.id) ? 'timer ON' : 'timer OFF (will restore on restart)';
+      msg +=
+        `• <code>${escapeHtml(row.id)}</code>\n` +
+        `  ${escapeHtml(row.slug)} | ${escapeHtml(row.stage_label)} | qty ${row.qty}\n` +
+        `  ${escapeHtml(fireUtc)}\n` +
+        `  ${inMem}\n` +
+        `  Cancel: <code>cancelarm ${escapeHtml(row.id)}</code>\n\n`;
+    }
+
+    msg += `Cancel all: <code>disarm</code>`;
+    await ctx.reply(msg, { parse_mode: 'HTML' });
+  } catch (err) {
+    await ctx.reply(`❌ Armed list failed: ${err.message}`);
+  }
+}
+
+async function cancelArmedById(ctx, id) {
+  try {
+    const idx = armedMints.findIndex((j) => j.id === id);
+    if (idx >= 0) {
+      try { clearTimeout(armedMints[idx].timer); } catch {}
+      armedMints.splice(idx, 1);
+    }
+    await dbMarkArmedDone(id, 'cancelled');
+    await ctx.reply(`🛰 Cancelled <code>${escapeHtml(id)}</code>`, { parse_mode: 'HTML' });
+  } catch (err) {
+    await ctx.reply(`❌ Cancel failed: ${err.message}`);
+  }
+}
+
 async function restoreArmedMintsFromDb() {
   try {
     const rows = await dbListArmedMints();
@@ -1555,6 +1601,7 @@ const mainMenu = Markup.keyboard([
   ['🎯 Sponsor ON', '🎯 Sponsor OFF'],
   ['⛽ Fund Gas', '📦 Collect NFTs'],
   ['💸 Offers', '📅 Schedule Mint'],
+  ['🛰 Armed Mints'],
   ['⏸ Pause All', '▶️ Resume All'],
   ['ℹ️ Help']
 ]).resize();
@@ -1786,6 +1833,11 @@ bot.hears('⛽ Fund Gas', async (ctx) => {
   );
 });
 
+bot.hears('🛰 Armed Mints', async (ctx) => {
+  if (!isAuthorizedChat(ctx)) return;
+  await listArmedStatus(ctx);
+});
+
 bot.hears('📅 Schedule Mint', async (ctx) => {
   if (!isAuthorizedChat(ctx)) return;
   pendingSchedule = { step: 'chain' };
@@ -1927,7 +1979,8 @@ bot.on('text', async (ctx, next) => {
     text.startsWith('👛') ||
     text.startsWith('ℹ️') ||
     text.startsWith('💸') ||
-    text.startsWith('📅')
+    text.startsWith('📅') ||
+    text.startsWith('🛰')
   ) {
     return next();
   }
@@ -2059,6 +2112,14 @@ bot.on('text', async (ctx, next) => {
       await armMintJob(ctx, job);
       return;
     }
+  }
+
+    // cancel one armed job: cancelarm arm-...
+  if (text.toLowerCase().startsWith('cancelarm ')) {
+    const id = text.slice('cancelarm '.length).trim();
+    if (!id) return ctx.reply('Usage: cancelarm <id>');
+    await cancelArmedById(ctx, id);
+    return;
   }
 
   if (text.toLowerCase() === 'disarm') {
