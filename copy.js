@@ -407,6 +407,43 @@ async function saveDailyStats() {
 }
 // ===== End stats =====
 
+async function dbSaveArmedMint(job) {
+  const { error } = await supabase.from('armed_mints').upsert({
+    id: job.id,
+    chain_key: job.chainKey,
+    slug: job.slug,
+    contract: job.contract,
+    stage_label: job.stageLabel,
+    qty: job.qty,
+    fire_at: new Date(job.fireAt).toISOString(),
+    status: 'armed',
+  });
+  if (error) throw new Error(`save armed mint: ${error.message}`);
+}
+
+async function dbMarkArmedDone(id, status = 'done') {
+  const { error } = await supabase
+    .from('armed_mints')
+    .update({ status })
+    .eq('id', id);
+  if (error) console.error(`[armed] mark ${status} failed: ${error.message}`);
+}
+
+async function dbDeleteArmedMint(id) {
+  const { error } = await supabase.from('armed_mints').delete().eq('id', id);
+  if (error) console.error(`[armed] delete failed: ${error.message}`);
+}
+
+async function dbListArmedMints() {
+  const { data, error } = await supabase
+    .from('armed_mints')
+    .select('*')
+    .eq('status', 'armed')
+    .order('fire_at', { ascending: true });
+  if (error) throw new Error(`list armed mints: ${error.message}`);
+  return data || [];
+}
+
 async function refreshWatchedWallets() {
   try {
     watchedWallets = await dbListWallets();
@@ -959,35 +996,79 @@ async function fireArmedMint(job) {
   }
 }
 
-function armMintJob(ctx, job) {
+function scheduleArmedTimer(job) {
   const now = Date.now();
-  // wake a few seconds early so we're ready at stage start
   const EARLY_MS = 5000;
   let delay = (job.fireAt - EARLY_MS) - now;
   if (delay < 0) delay = 0;
 
-  const id = `arm-${Date.now()}`;
   const timer = setTimeout(async () => {
-    armedMints = armedMints.filter((j) => j.id !== id);
-    await fireArmedMint(job);
+    armedMints = armedMints.filter((j) => j.id !== job.id);
+    try {
+      await fireArmedMint(job);
+      await dbMarkArmedDone(job.id, 'done');
+    } catch (err) {
+      console.error('[armed] fire error:', err.message);
+      await dbMarkArmedDone(job.id, 'error');
+    }
   }, delay);
 
-  armedMints.push({ ...job, id, timer });
+  armedMints.push({ ...job, timer });
+  return delay;
+}
 
-  const fireUtc = new Date(job.fireAt).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
+async function armMintJob(ctx, job) {
+  const id = `arm-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+  const full = { ...job, id };
+
+  try {
+    await dbSaveArmedMint(full);
+  } catch (err) {
+    return ctx.reply(`❌ Failed to save armed job: ${err.message}`);
+  }
+
+  const delay = scheduleArmedTimer(full);
+  const fireUtc = new Date(full.fireAt).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
   const inMin = Math.round(delay / 60000);
 
   return ctx.reply(
-    `✅ <b>Armed</b>\n` +
-    `Slug: <code>${escapeHtml(job.slug)}</code>\n` +
-    `Stage: <b>${escapeHtml(job.stageLabel)}</b>\n` +
-    `Qty: <b>${job.qty}</b>\n` +
+    `✅ <b>Armed</b> (saved)\n` +
+    `Id: <code>${escapeHtml(id)}</code>\n` +
+    `Slug: <code>${escapeHtml(full.slug)}</code>\n` +
+    `Stage: <b>${escapeHtml(full.stageLabel)}</b>\n` +
+    `Qty: <b>${full.qty}</b>\n` +
     `Fire at: <code>${escapeHtml(fireUtc)}</code>\n` +
     `Timer: ~<b>${inMin}</b> min (5s early)\n\n` +
-    `⚠️ Cleared if bot restarts.\n` +
+    `Survives restarts.\n` +
     `Type <code>disarm</code> to cancel all armed jobs.`,
     { parse_mode: 'HTML' }
   );
+}
+
+async function restoreArmedMintsFromDb() {
+  try {
+    const rows = await dbListArmedMints();
+    let restored = 0;
+    for (const row of rows) {
+      const fireAt = new Date(row.fire_at).getTime();
+      const job = {
+        id: row.id,
+        chainKey: row.chain_key,
+        slug: row.slug,
+        contract: row.contract,
+        stageLabel: row.stage_label,
+        qty: row.qty,
+        fireAt,
+      };
+
+      // if already past by a lot, still fire once (catch-up)
+      scheduleArmedTimer(job);
+      restored += 1;
+    }
+    console.log(`[armed] restored ${restored} job(s) from Supabase`);
+  } catch (err) {
+    console.error(`[armed] restore failed: ${err.message}`);
+  }
 }
 
 async function runInspectDrop(ctx, chainKey, contractAddress) {
@@ -1983,6 +2064,7 @@ bot.on('text', async (ctx, next) => {
   if (text.toLowerCase() === 'disarm') {
     for (const j of armedMints) {
       try { clearTimeout(j.timer); } catch {}
+      try { await dbMarkArmedDone(j.id, 'cancelled'); } catch {}
     }
     const n = armedMints.length;
     armedMints = [];
@@ -3148,6 +3230,8 @@ async function main() {
   console.log(`[startup] loaded ${watchedWallets.length} watched wallet(s)`);
   console.log('[startup] loading daily stats from Supabase...');
   await loadDailyStats();
+  console.log('[startup] restoring armed mints from Supabase...');
+  await restoreArmedMintsFromDb();
   setInterval(refreshWatchedWallets, WALLET_REFRESH_MS);
 
   console.log('[startup] launching Telegram bot (long-poll)...');
