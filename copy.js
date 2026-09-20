@@ -960,26 +960,55 @@ async function fireArmedMint(job) {
     const results = [];
     let success = 0;
 
-    // Parallel mint — all wallets at the same time
+    // Parallel wallets + retry spam per wallet (competitive drops / OpenSea errors)
+    const MAX_TRIES = Number(process.env.ARMED_MINT_TRIES || 25);      // attempts per wallet
+    const RETRY_MS = Number(process.env.ARMED_MINT_RETRY_MS || 400);    // pause between tries
+    const WINDOW_MS = Number(process.env.ARMED_MINT_WINDOW_MS || 45000); // stop after this long
+
+    await notify(
+      `🔁 Retry mode: <b>${MAX_TRIES}</b> tries / wallet, every <b>${RETRY_MS}ms</b>, window <b>${WINDOW_MS}ms</b>`
+    );
+
     const settled = await Promise.all(
       wallets.map(async (w) => {
-        try {
-          const raw = await buildDropMintTransaction(job.slug, w.address, job.qty);
-          const { to, data, value } = readMintTxFields(raw);
-          if (!to || !data) {
-            return `❌ ${w.address.slice(0, 10)}... invalid tx data`;
+        const started = Date.now();
+        let lastErr = 'no attempt';
+
+        for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
+          if (Date.now() - started > WINDOW_MS) {
+            lastErr = `window ${WINDOW_MS}ms expired`;
+            break;
           }
-          const valueWei = BigInt(value || '0');
-          const signer = w.signer.connect(provider);
-          const tx = await signer.sendTransaction({ to, data, value: valueWei });
-          const receipt = await tx.wait();
-          if (receipt.status === 1) {
-            return `✅ ${w.address.slice(0, 10)}... qty ${job.qty} | ${tx.hash.slice(0, 12)}...`;
+
+          try {
+            const raw = await buildDropMintTransaction(job.slug, w.address, job.qty);
+            const { to, data, value } = readMintTxFields(raw);
+            if (!to || !data) {
+              lastErr = 'invalid tx data';
+            } else {
+              const valueWei = BigInt(value || '0');
+              const signer = w.signer.connect(provider);
+              const tx = await signer.sendTransaction({ to, data, value: valueWei });
+              const receipt = await tx.wait();
+              if (receipt.status === 1) {
+                return `✅ ${w.address.slice(0, 10)}... qty ${job.qty} | try ${attempt} | ${tx.hash.slice(0, 12)}...`;
+              }
+              lastErr = 'reverted';
+            }
+          } catch (err) {
+            lastErr = cleanOpenSeaError(err.message || 'fail').slice(0, 70);
+            // stop early on clear permanent failures
+            const permanent =
+              /not eligible|not in allowlist|already minted|max.*mint|insufficient/i.test(lastErr);
+            if (permanent) {
+              return `❌ ${w.address.slice(0, 10)}... ${lastErr}`;
+            }
           }
-          return `❌ ${w.address.slice(0, 10)}... reverted`;
-        } catch (err) {
-          return `❌ ${w.address.slice(0, 10)}... ${cleanOpenSeaError(err.message || 'fail').slice(0, 70)}`;
+
+          await new Promise((r) => setTimeout(r, RETRY_MS));
         }
+
+        return `❌ ${w.address.slice(0, 10)}... gave up → ${lastErr}`;
       })
     );
 
