@@ -960,30 +960,32 @@ async function fireArmedMint(job) {
     const results = [];
     let success = 0;
 
-    // Sequential mint
-    for (const w of wallets) {
-      try {
-        const raw = await buildDropMintTransaction(job.slug, w.address, job.qty);
-        const { to, data, value } = readMintTxFields(raw);
-        if (!to || !data) {
-          results.push(`❌ ${w.address.slice(0, 10)}... invalid tx data`);
-          continue;
+    // Parallel mint — all wallets at the same time
+    const settled = await Promise.all(
+      wallets.map(async (w) => {
+        try {
+          const raw = await buildDropMintTransaction(job.slug, w.address, job.qty);
+          const { to, data, value } = readMintTxFields(raw);
+          if (!to || !data) {
+            return `❌ ${w.address.slice(0, 10)}... invalid tx data`;
+          }
+          const valueWei = BigInt(value || '0');
+          const signer = w.signer.connect(provider);
+          const tx = await signer.sendTransaction({ to, data, value: valueWei });
+          const receipt = await tx.wait();
+          if (receipt.status === 1) {
+            return `✅ ${w.address.slice(0, 10)}... qty ${job.qty} | ${tx.hash.slice(0, 12)}...`;
+          }
+          return `❌ ${w.address.slice(0, 10)}... reverted`;
+        } catch (err) {
+          return `❌ ${w.address.slice(0, 10)}... ${cleanOpenSeaError(err.message || 'fail').slice(0, 70)}`;
         }
-        const valueWei = BigInt(value || '0');
-        const signer = w.signer.connect(provider);
-        const tx = await signer.sendTransaction({ to, data, value: valueWei });
-        const receipt = await tx.wait();
-        if (receipt.status === 1) {
-          success += 1;
-          results.push(`✅ ${w.address.slice(0, 10)}... qty ${job.qty} | ${tx.hash.slice(0, 12)}...`);
-        } else {
-          results.push(`❌ ${w.address.slice(0, 10)}... reverted`);
-        }
-      } catch (err) {
-        results.push(
-          `❌ ${w.address.slice(0, 10)}... ${cleanOpenSeaError(err.message || 'fail').slice(0, 70)}`
-        );
-      }
+      })
+    );
+
+    for (const line of settled) {
+      results.push(line);
+      if (line.startsWith('✅')) success += 1;
     }
 
     await notify(
