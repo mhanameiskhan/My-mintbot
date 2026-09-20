@@ -415,6 +415,7 @@ async function dbSaveArmedMint(job) {
     contract: job.contract,
     stage_label: job.stageLabel,
     qty: job.qty,
+    expected_total_wei: String(job.expectedTotalWei ?? '0'),
     fire_at: new Date(job.fireAt).toISOString(),
     status: 'armed',
   });
@@ -987,6 +988,15 @@ async function fireArmedMint(job) {
               lastErr = 'invalid tx data';
             } else {
               const valueWei = BigInt(value || '0');
+              const lockedWei = BigInt(job.expectedTotalWei || '0');
+
+              if (valueWei !== lockedWei) {
+                return (
+                  `🛑 ${w.address.slice(0, 10)}... price changed ` +
+                  `(got ${ethers.formatEther(valueWei)} ETH, locked ${ethers.formatEther(lockedWei)} ETH)`
+                );
+              }
+
               const signer = w.signer.connect(provider);
               const tx = await signer.sendTransaction({ to, data, value: valueWei });
               const receipt = await tx.wait();
@@ -1068,6 +1078,7 @@ async function armMintJob(ctx, job) {
     `Slug: <code>${escapeHtml(full.slug)}</code>\n` +
     `Stage: <b>${escapeHtml(full.stageLabel)}</b>\n` +
     `Qty: <b>${full.qty}</b>\n` +
+    `Locked total: <b>${ethers.formatEther(BigInt(full.expectedTotalWei || '0'))}</b> ETH\n` +
     `Fire at: <code>${escapeHtml(fireUtc)}</code>\n` +
     `Timer: ~<b>${inMin}</b> min (5s early)\n\n` +
     `Survives restarts.\n` +
@@ -1135,6 +1146,7 @@ async function restoreArmedMintsFromDb() {
         contract: row.contract,
         stageLabel: row.stage_label,
         qty: row.qty,
+        expectedTotalWei: row.expected_total_wei || '0',
         fireAt,
       };
 
@@ -2123,12 +2135,35 @@ bot.on('text', async (ctx, next) => {
       }
 
       const stage = pendingSchedule.stage;
-      const stageLabel = stage.label || stage.stage_type || stage.name || `Stage ${pendingSchedule.stageIndex + 1}`;
-      let fireAt = pendingSchedule.startMs;
-      if (!fireAt) {
-        // no start time → fire soon
-        fireAt = Date.now() + 3000;
+      const stageLabel =
+        stage.label || stage.stage_type || stage.name || `Stage ${pendingSchedule.stageIndex + 1}`;
+
+      // Read stage price (usually wei string per token)
+      let pricePerTokenWei = null;
+      const rawPrice = stage.price ?? stage.mint_price ?? stage.price_wei ?? null;
+      try {
+        if (typeof rawPrice === 'string' && /^\d+$/.test(rawPrice)) {
+          pricePerTokenWei = BigInt(rawPrice);
+        } else if (rawPrice && typeof rawPrice === 'object') {
+          const v = rawPrice.value ?? rawPrice.amount ?? rawPrice.unit;
+          if (v != null && /^\d+$/.test(String(v))) pricePerTokenWei = BigInt(String(v));
+        }
+      } catch {
+        pricePerTokenWei = null;
       }
+
+      if (pricePerTokenWei == null) {
+        pendingSchedule = null;
+        return ctx.reply(
+          '❌ Could not read this stage’s price. Arm cancelled.\n' +
+          'Pick another stage or inspect the drop again.'
+        );
+      }
+
+      const expectedTotalWei = (pricePerTokenWei * BigInt(qty)).toString();
+
+      let fireAt = pendingSchedule.startMs;
+      if (!fireAt) fireAt = Date.now() + 3000;
 
       const job = {
         chainKey: pendingSchedule.chain,
@@ -2137,6 +2172,7 @@ bot.on('text', async (ctx, next) => {
         stageLabel: String(stageLabel),
         qty,
         fireAt,
+        expectedTotalWei,
       };
 
       pendingSchedule = null;
