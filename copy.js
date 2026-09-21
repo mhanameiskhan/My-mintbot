@@ -988,7 +988,7 @@ async function fireArmedMint(job) {
               lastErr = 'invalid tx data';
             } else {
               const valueWei = BigInt(value || '0');
-              const lockedWei = BigInt(job.expectedTotalWei || '0');
+              const lockedWei = BigInt(job.expected\\\\TotalWei || '0');
 
               if (valueWei !== lockedWei) {
                 return (
@@ -1127,7 +1127,11 @@ async function cancelArmedById(ctx, id) {
       armedMints.splice(idx, 1);
     }
     await dbMarkArmedDone(id, 'cancelled');
-    await ctx.reply(`🛰 Cancelled <code>${escapeHtml(id)}</code>`, { parse_mode: 'HTML' });
+    await ctx.reply(
+      `🛰 Cancelled <code>${escapeHtml(id)}</code>\n` +
+      `Timer cleared + DB status set to cancelled.`,
+      { parse_mode: 'HTML' }
+    );
   } catch (err) {
     await ctx.reply(`❌ Cancel failed: ${err.message}`);
   }
@@ -2029,6 +2033,31 @@ bot.on('text', async (ctx, next) => {
   }
 
   
+  // Armed mint controls must work even when no other flow is active
+  if (text.toLowerCase() === 'disarm') {
+    for (const j of armedMints) {
+      try { clearTimeout(j.timer); } catch {}
+      try { await dbMarkArmedDone(j.id, 'cancelled'); } catch {}
+    }
+    // also cancel any DB rows still marked armed (timer list may be incomplete)
+    try {
+      const rows = await dbListArmedMints();
+      for (const row of rows) {
+        try { await dbMarkArmedDone(row.id, 'cancelled'); } catch {}
+      }
+    } catch {}
+    const n = armedMints.length;
+    armedMints = [];
+    return ctx.reply(`🛰 Disarmed all jobs (cleared timers + DB).`, { parse_mode: 'HTML' });
+  }
+
+  if (text.toLowerCase().startsWith('cancelarm ')) {
+    const id = text.slice('cancelarm '.length).trim();
+    if (!id) return ctx.reply('Usage: cancelarm <id>');
+    await cancelArmedById(ctx, id);
+    return;
+  }
+
   // If no interactive flow is active, do not block other handlers
   if (!pendingFundGas && !pendingCollect && !pendingOffers && !pendingAcceptOffers && !pendingSchedule) {
     return next();
@@ -2179,24 +2208,6 @@ bot.on('text', async (ctx, next) => {
       await armMintJob(ctx, job);
       return;
     }
-  }
-
-    // cancel one armed job: cancelarm arm-...
-  if (text.toLowerCase().startsWith('cancelarm ')) {
-    const id = text.slice('cancelarm '.length).trim();
-    if (!id) return ctx.reply('Usage: cancelarm <id>');
-    await cancelArmedById(ctx, id);
-    return;
-  }
-
-  if (text.toLowerCase() === 'disarm') {
-    for (const j of armedMints) {
-      try { clearTimeout(j.timer); } catch {}
-      try { await dbMarkArmedDone(j.id, 'cancelled'); } catch {}
-    }
-    const n = armedMints.length;
-    armedMints = [];
-    return ctx.reply(`🛰 Disarmed <b>${n}</b> job(s).`, { parse_mode: 'HTML' });
   }
 
     // Offers flow: chain → contract → min → max
