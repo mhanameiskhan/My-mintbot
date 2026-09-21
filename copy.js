@@ -503,6 +503,31 @@ async function getEthPriceUsd() {
   return price;
 }
 
+function parseWalletSelection(text, walletList) {
+  const raw = String(text || '').trim().toLowerCase();
+  if (!raw) throw new Error('empty');
+  if (raw === 'all') return walletList.slice();
+
+  // numbers: 1,3,5  (1-based index into mint wallets)
+  const parts = raw.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
+  const selected = [];
+  for (const p of parts) {
+    if (!/^\d+$/.test(p)) throw new Error(`bad index: ${p}`);
+    const idx = Number(p) - 1;
+    if (idx < 0 || idx >= walletList.length) throw new Error(`index out of range: ${p}`);
+    selected.push(walletList[idx]);
+  }
+  if (selected.length === 0) throw new Error('no wallets');
+  // unique by address
+  const seen = new Set();
+  return selected.filter((w) => {
+    const a = w.address.toLowerCase();
+    if (seen.has(a)) return false;
+    seen.add(a);
+    return true;
+  });
+}
+
 function parseFundAmount(amountStr, chainKey) {
   const raw = String(amountStr || '').trim().toLowerCase();
   if (!raw) throw new Error('empty');
@@ -535,7 +560,7 @@ function parseChainKey(text) {
   return null;
 }
 
-async function runFundGas(ctx, amountStr, chainKey = 'rh') {
+async function runFundGas(ctx, amountStr, chainKey = 'rh', selectedWallets = null) {
   try {
     if (!sponsorWallet) {
       return ctx.reply('❌ No sponsor/funder wallet configured.');
@@ -543,6 +568,9 @@ async function runFundGas(ctx, amountStr, chainKey = 'rh') {
     if (!wallets || wallets.length === 0) {
       return ctx.reply('❌ No minting wallets loaded.');
     }
+
+    const targets =
+      selectedWallets && selectedWallets.length > 0 ? selectedWallets : wallets;
 
     const { pool, label } = getChainRpcPool(chainKey);
     const isArc = String(chainKey).toLowerCase() === 'arc';
@@ -591,7 +619,7 @@ async function runFundGas(ctx, amountStr, chainKey = 'rh') {
     }
 
     const amountWei = ethers.parseEther(String(amountEth));
-    const totalNeeded = amountWei * BigInt(wallets.length);
+      const totalNeeded = amountWei * BigInt(targets.length);
     const provider = pool.current();
     const funder = sponsorWallet.signer.connect(provider);
 
@@ -605,7 +633,7 @@ async function runFundGas(ctx, amountStr, chainKey = 'rh') {
     }
 
     await ctx.reply(
-      `⛽ Sending <b>${Number(amountEth).toFixed(6)}</b> ${tokenName} on <b>${label}</b> to <b>${wallets.length}</b> wallets...${usdNote}\n` +
+      `⛽ Sending <b>${Number(amountEth).toFixed(6)}</b> ${tokenName} on <b>${label}</b> to <b>${targets.length}</b> wallet(s)...${usdNote}\n` +
       `From: <code>${escapeHtml(sponsorWallet.address.slice(0, 12))}...</code>`,
       { parse_mode: 'HTML' }
     );
@@ -613,7 +641,7 @@ async function runFundGas(ctx, amountStr, chainKey = 'rh') {
     const results = [];
     let successCount = 0;
 
-    for (const w of wallets) {
+    for (const w of targets) {
       try {
         const tx = await funder.sendTransaction({
           to: w.address,
@@ -629,7 +657,7 @@ async function runFundGas(ctx, amountStr, chainKey = 'rh') {
 
     await ctx.reply(
       `⛽ <b>Fund Gas result</b> (${label})\n` +
-      `Success: <b>${successCount}/${wallets.length}</b>\n\n` +
+      `Success: <b>${successCount}/${targets.length}</b>\n\n` +
       results.join('\n'),
       { parse_mode: 'HTML' }
     );
@@ -905,6 +933,30 @@ async function runAcceptOffers(ctx, payload) {
   }
 }
 
+function parseContractOrOpenSeaLink(text) {
+  const raw = String(text || '').trim();
+
+  // contract address
+  if (ethers.isAddress(raw)) {
+    return { type: 'contract', value: raw };
+  }
+
+  // OpenSea collection URL
+  // https://opensea.io/collection/slug
+  // https://opensea.io/collection/slug/...
+  const m = raw.match(/opensea\.io\/collection\/([^\/\?\s#]+)/i);
+  if (m && m[1]) {
+    return { type: 'slug', value: decodeURIComponent(m[1]) };
+  }
+
+  // bare slug (no 0x, no spaces)
+  if (/^[a-z0-9][a-z0-9\-]{1,80}$/i.test(raw) && !raw.startsWith('0x')) {
+    return { type: 'slug', value: raw };
+  }
+
+  throw new Error('invalid');
+}
+
 function formatUtc(ts) {
   if (!ts) return 'unknown';
   try {
@@ -1164,28 +1216,52 @@ async function restoreArmedMintsFromDb() {
   }
 }
 
-async function runInspectDrop(ctx, chainKey, contractAddress) {
+async function runInspectDrop(ctx, chainKey, inputText) {
   try {
-    if (!ethers.isAddress(contractAddress)) {
-      return ctx.reply('❌ Invalid contract address.');
-    }
-
     const { label, openseaSlug } = getChainRpcPool(chainKey);
+
+    let parsed;
+    try {
+      parsed = parseContractOrOpenSeaLink(inputText);
+    } catch {
+      return ctx.reply(
+        '❌ Send a contract <code>0x...</code>, collection slug, or OpenSea link.\n' +
+        'Example: https://opensea.io/collection/my-drop',
+        { parse_mode: 'HTML' }
+      );
+    }
 
     await ctx.reply(
       `📅 Inspecting drop on <b>${label}</b>\n` +
-      `Contract: <code>${escapeHtml(contractAddress)}</code>\n` +
+      `Input: <code>${escapeHtml(inputText)}</code>\n` +
       `Please wait...`,
       { parse_mode: 'HTML' }
     );
 
-    let slug;
-    try {
-      slug = await resolveCollectionSlug(contractAddress, openseaSlug);
-    } catch (err) {
-      return ctx.reply(`❌ OpenSea lookup failed: ${err.message}`);
+    let slug = null;
+    let contractAddress = null;
+
+    if (parsed.type === 'slug') {
+      slug = parsed.value;
+      try {
+        const dropProbe = await openseaFetch(`/drops/${encodeURIComponent(slug)}`);
+        contractAddress =
+          dropProbe.contract_address ||
+          dropProbe.contract ||
+          dropProbe.address ||
+          null;
+      } catch {
+        // still try drops with slug
+      }
+    } else {
+      contractAddress = parsed.value;
+      try {
+        slug = await resolveCollectionSlug(contractAddress, openseaSlug);
+      } catch (err) {
+        return ctx.reply(`❌ OpenSea lookup failed: ${err.message}`);
+      }
+      if (!slug) return ctx.reply('❌ No OpenSea collection found for that contract.');
     }
-    if (!slug) return ctx.reply('❌ No OpenSea collection found for that contract.');
 
     let drop;
     try {
@@ -1259,7 +1335,7 @@ async function runInspectDrop(ctx, chainKey, contractAddress) {
     pendingSchedule = {
       step: 'stage',
       chain: chainKey,
-      contract: contractAddress,
+      contract: contractAddress || '',
       slug,
       stages,
       label,
@@ -1477,6 +1553,7 @@ async function runListOffers(ctx, chainKey, contractAddress, minPrice, maxPrice)
     }
 
     pendingAcceptOffers = {
+      step: 'count',
       matches: acceptable,
       chainKey,
       contract: contractAddress,
@@ -1484,8 +1561,9 @@ async function runListOffers(ctx, chainKey, contractAddress, minPrice, maxPrice)
     };
 
     await ctx.reply(
-      `💸 Accept <b>${acceptable.length}</b> offer(s)?\n\n` +
-      `Type <code>yes</code> to accept, or <code>no</code> to cancel.`,
+      `💸 Found <b>${acceptable.length}</b> acceptable offer(s).\n\n` +
+      `How many NFTs to sell?\n` +
+      `Reply <code>all</code> or a number (e.g. <code>1</code>).`,
       { parse_mode: 'HTML' }
     );
   } catch (err) {
@@ -1870,12 +1948,14 @@ bot.hears('⛽ Fund Gas', async (ctx) => {
 
   pendingFundGas = { step: 'chain' };
   pendingCollect = null;
+  pendingOffers = null;
+  pendingSchedule = null;
 
   await ctx.reply(
     '⛽ <b>Fund Gas</b>\n\n' +
-    'Step 1/2 — Choose chain:\n' +
+    'Step 1/3 — Chain:\n' +
     '<code>rh</code> / <code>eth</code> / <code>ink</code> / <code>arc</code>\n\n' +
-    'Or type <code>cancel</code>.',
+    'Or <code>cancel</code>.',
     { parse_mode: 'HTML' }
   );
 });
@@ -2072,22 +2152,51 @@ bot.on('text', async (ctx, next) => {
     return ctx.reply('Cancelled.');
   }
 
-  // Accept offers confirmation
+  // Accept offers: count → yes/no
   if (pendingAcceptOffers) {
-    const ans = text.toLowerCase();
-    if (ans === 'no' || ans === 'n') {
+    const ans = text.toLowerCase().trim();
+
+    if (ans === 'no' || ans === 'n' || ans === 'cancel') {
       pendingAcceptOffers = null;
       return ctx.reply('Cancelled offer accept.');
     }
-    if (ans === 'yes' || ans === 'y') {
-      const payload = pendingAcceptOffers;
-      pendingAcceptOffers = null;
-      await runAcceptOffers(ctx, payload);
-      return;
+
+    if (pendingAcceptOffers.step === 'count') {
+      let take = pendingAcceptOffers.matches.length;
+      if (ans === 'all') {
+        take = pendingAcceptOffers.matches.length;
+      } else if (/^\d+$/.test(ans)) {
+        take = Number(ans);
+        if (take < 1) return ctx.reply('❌ Number must be ≥ 1');
+        if (take > pendingAcceptOffers.matches.length) {
+          take = pendingAcceptOffers.matches.length;
+        }
+      } else {
+        return ctx.reply('Reply <code>all</code> or a number.', { parse_mode: 'HTML' });
+      }
+
+      pendingAcceptOffers = {
+        ...pendingAcceptOffers,
+        step: 'confirm',
+        matches: pendingAcceptOffers.matches.slice(0, take),
+      };
+
+      return ctx.reply(
+        `💸 Accept <b>${pendingAcceptOffers.matches.length}</b> offer(s)?\n\n` +
+        `Type <code>yes</code> or <code>no</code>.`,
+        { parse_mode: 'HTML' }
+      );
     }
-    return ctx.reply('Type <code>yes</code> to accept or <code>no</code> to cancel.', {
-      parse_mode: 'HTML',
-    });
+
+    if (pendingAcceptOffers.step === 'confirm') {
+      if (ans === 'yes' || ans === 'y') {
+        const payload = pendingAcceptOffers;
+        pendingAcceptOffers = null;
+        await runAcceptOffers(ctx, payload);
+        return;
+      }
+      return ctx.reply('Type <code>yes</code> or <code>no</code>.', { parse_mode: 'HTML' });
+    }
   }
 
   // Fund gas flow: chain → amount
@@ -2095,22 +2204,49 @@ bot.on('text', async (ctx, next) => {
     if (pendingFundGas.step === 'chain') {
       const chainKey = parseChainKey(text);
       if (!chainKey) {
-        return ctx.reply('❌ Invalid chain. Use: rh / eth / ink');
+        return ctx.reply('❌ Invalid chain. Use: rh / eth / ink / arc');
       }
-      pendingFundGas = { step: 'amount', chain: chainKey };
-      const tokenName = chainKey === 'arc' ? 'USDC' : 'ETH';
+
+      const list = (wallets || [])
+        .map((w, i) => `${i + 1}. <code>${escapeHtml(w.address.slice(0, 12))}...</code>`)
+        .join('\n');
+
+      pendingFundGas = { step: 'wallets', chain: chainKey };
       return ctx.reply(
-        `⛽ Step 2/2 — Amount for <b>each</b> wallet on <b>${chainKey}</b>.\n\n` +
-        `Native ${tokenName}: <code>0.002</code>\n` +
-        `Or dollars: <code>$3</code> / <code>3usd</code>`,
+        `⛽ Step 2/3 — Which wallets?\n\n` +
+        `${list || 'No wallets'}\n\n` +
+        `Reply <code>all</code> or numbers like <code>1,3,5</code>`,
         { parse_mode: 'HTML' }
       );
     }
 
+    if (pendingFundGas.step === 'wallets') {
+      try {
+        const selected = parseWalletSelection(text, wallets);
+        pendingFundGas = {
+          step: 'amount',
+          chain: pendingFundGas.chain,
+          selected,
+        };
+        const tokenName = pendingFundGas.chain === 'arc' ? 'USDC' : 'ETH';
+        return ctx.reply(
+          `⛽ Step 3/3 — Amount for <b>each</b> selected wallet (${selected.length}).\n\n` +
+          `Native ${tokenName}: <code>0.002</code>\n` +
+          `Or dollars: <code>$3</code>`,
+          { parse_mode: 'HTML' }
+        );
+      } catch {
+        return ctx.reply('❌ Use <code>all</code> or indexes like <code>1,2,4</code>', {
+          parse_mode: 'HTML',
+        });
+      }
+    }
+
     if (pendingFundGas.step === 'amount') {
       const chainKey = pendingFundGas.chain || 'rh';
+      const selected = pendingFundGas.selected || null;
       pendingFundGas = null;
-      await runFundGas(ctx, text, chainKey);
+      await runFundGas(ctx, text, chainKey, selected);
       return;
     }
   }
@@ -2121,15 +2257,18 @@ bot.on('text', async (ctx, next) => {
       const chainKey = parseChainKey(text);
       if (!chainKey) return ctx.reply('❌ Invalid chain. Use: rh / eth / ink / arc');
       pendingSchedule = { step: 'contract', chain: chainKey };
-      return ctx.reply('📅 Step 2 — Send the collection <b>contract address</b>.', {
-        parse_mode: 'HTML',
-      });
+      return ctx.reply(
+        '📅 Step 2 — Send collection <b>contract</b>, <b>slug</b>, or OpenSea <b>link</b>.\n\n' +
+        'Examples:\n' +
+        '<code>0xabc...</code>\n' +
+        '<code>my-collection-slug</code>\n' +
+        '<code>https://opensea.io/collection/my-collection-slug</code>',
+        { parse_mode: 'HTML' }
+      );
     }
 
     if (pendingSchedule.step === 'contract') {
-      if (!ethers.isAddress(text)) return ctx.reply('❌ Invalid contract address.');
       const chainKey = pendingSchedule.chain;
-      // runInspectDrop will set pendingSchedule.step = 'stage'
       await runInspectDrop(ctx, chainKey, text);
       return;
     }
