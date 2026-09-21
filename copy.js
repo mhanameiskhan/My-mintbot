@@ -988,7 +988,7 @@ async function fireArmedMint(job) {
               lastErr = 'invalid tx data';
             } else {
               const valueWei = BigInt(value || '0');
-              const lockedWei = BigInt(job.expected\\\\TotalWei || '0');
+              const lockedWei = BigInt(job.expectedTotalWei || '0');
 
               if (valueWei !== lockedWei) {
                 return (
