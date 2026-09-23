@@ -1534,15 +1534,40 @@ async function runListOffers(ctx, chainKey, contractAddress, minPrice, maxPrice)
         }
 
         let pass = true;
+
+        // Min filter
         if (minPrice) {
           if (minPrice.kind === 'usd') {
-            if (usd == null || usd < minPrice.value) pass = false;
-          } else if (parsed.native < minPrice.value) pass = false;
+            if (minPrice.value <= 0) {
+              // $0 min → do not filter out when USD is unknown
+              pass = true;
+            } else if (usd != null) {
+              if (usd < minPrice.value) pass = false;
+            } else if (ethUsd && ['ETH', 'WETH'].includes(parsed.currency)) {
+              const approx = parsed.native * ethUsd;
+              if (approx < minPrice.value) pass = false;
+            } else {
+              // can't evaluate USD min without usd — keep offer (don't drop)
+              pass = true;
+            }
+          } else {
+            if (parsed.native < minPrice.value) pass = false;
+          }
         }
+
+        // Max filter
         if (pass && maxPrice) {
           if (maxPrice.kind === 'usd') {
-            if (usd == null || usd > maxPrice.value) pass = false;
-          } else if (parsed.native > maxPrice.value) pass = false;
+            if (usd != null) {
+              if (usd > maxPrice.value) pass = false;
+            } else if (ethUsd && ['ETH', 'WETH'].includes(parsed.currency)) {
+              const approx = parsed.native * ethUsd;
+              if (approx > maxPrice.value) pass = false;
+            }
+            // if USD unknown and max is set, keep offer (safer to show than hide)
+          } else {
+            if (parsed.native > maxPrice.value) pass = false;
+          }
         }
 
         if (!pass) {
