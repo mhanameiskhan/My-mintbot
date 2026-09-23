@@ -1400,7 +1400,8 @@ async function runListOffers(ctx, chainKey, contractAddress, minPrice, maxPrice)
     for (const w of wallets) {
       let tokenIds = [];
 
-      // 1) OpenSea account NFTs
+      // 1) OpenSea account NFTs (looser matching)
+      let apiNftCount = 0;
       try {
         let next = null;
         let pages = 0;
@@ -1410,6 +1411,8 @@ async function runListOffers(ctx, chainKey, contractAddress, minPrice, maxPrice)
             (next ? `&next=${encodeURIComponent(next)}` : '');
           const data = await openseaFetch(path);
           const nfts = data.nfts || [];
+          apiNftCount += nfts.length;
+
           for (const item of nfts) {
             const c = String(
               item.contract ||
@@ -1418,20 +1421,63 @@ async function runListOffers(ctx, chainKey, contractAddress, minPrice, maxPrice)
               item.collection?.contract ||
               ''
             ).toLowerCase();
-            if (c && c !== contractLower) continue;
-            // if contract field missing, still try when collection slug matches
-            const itemSlug = item.collection || item.collection_slug || '';
-            if (!c && itemSlug && String(itemSlug).toLowerCase() !== String(slug).toLowerCase()) continue;
-            if (!c && !itemSlug) continue;
+
+            const itemSlug = String(
+              item.collection ||
+              item.collection_slug ||
+              item.collectionSlug ||
+              ''
+            ).toLowerCase();
+
+            const slugMatch = itemSlug && itemSlug === String(slug).toLowerCase();
+            const contractMatch = c && c === contractLower;
+
+            // keep if contract matches OR collection slug matches
+            if (!contractMatch && !slugMatch) continue;
 
             const id = item.identifier ?? item.token_id ?? item.tokenId;
             if (id != null) tokenIds.push(String(id));
           }
+
           next = data.next || null;
           pages += 1;
-        } while (next && pages < 6);
+        } while (next && pages < 10);
       } catch (err) {
-        debugOwned.push(`${w.address.slice(0, 10)}... NFT fetch err: ${(err.message || '').slice(0, 50)}`);
+        debugOwned.push(
+          `${w.address.slice(0, 10)}... NFT fetch err: ${(err.message || '').slice(0, 60)}`
+        );
+      }
+
+      // 2) Fallback: on-chain enumerable (if contract supports it)
+      if (tokenIds.length === 0) {
+        try {
+          const { pool } = getChainRpcPool(chainKey);
+          const provider = pool.current();
+          const nft = new ethers.Contract(
+            contractAddress,
+            [
+              'function balanceOf(address) view returns (uint256)',
+              'function tokenOfOwnerByIndex(address,uint256) view returns (uint256)',
+            ],
+            provider
+          );
+          const bal = Number(await nft.balanceOf(w.address));
+          for (let i = 0; i < bal && i < 50; i++) {
+            const id = await nft.tokenOfOwnerByIndex(w.address, i);
+            tokenIds.push(String(id));
+          }
+          if (bal > 0) {
+            debugOwned.push(`${w.address.slice(0, 10)}... on-chain balance ${bal}`);
+          }
+        } catch {
+          // not enumerable / failed
+        }
+      }
+
+      if (tokenIds.length === 0) {
+        debugOwned.push(
+          `${w.address.slice(0, 10)}... owns 0 matched (API nfts seen: ${apiNftCount})`
+        );
       }
 
       tokenIds = [...new Set(tokenIds)];
