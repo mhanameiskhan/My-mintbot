@@ -808,6 +808,9 @@ async function runAcceptOffers(ctx, payload) {
       { parse_mode: 'HTML' }
     );
 
+    // OpenSea Seaport conduit (common operator used for transfers)
+    const OPENSEA_CONDUIT = '0x1E0049783F008A0085193E00003D00cd54003c71';
+
     for (const m of matches) {
       try {
         if (!m.orderHash) {
@@ -918,6 +921,31 @@ async function runAcceptOffers(ctx, payload) {
         }
 
         const signer = m.wallet.signer.connect(provider);
+
+        // Ensure OpenSea can transfer this NFT from the seller wallet
+        try {
+          const nft = new ethers.Contract(
+            contract,
+            [
+              'function isApprovedForAll(address owner, address operator) view returns (bool)',
+              'function setApprovalForAll(address operator, bool approved)',
+            ],
+            signer
+          );
+          const approved = await nft.isApprovedForAll(m.wallet.address, OPENSEA_CONDUIT);
+          if (!approved) {
+            const approveTx = await nft.setApprovalForAll(OPENSEA_CONDUIT, true);
+            await approveTx.wait();
+            results.push(
+              `🔓 ${m.wallet.address.slice(0, 10)}... approved collection for OpenSea conduit`
+            );
+          }
+        } catch (aprErr) {
+          results.push(
+            `⚠️ ${m.wallet.address.slice(0, 10)}... approval check/tx: ${(aprErr.message || '').slice(0, 60)}`
+          );
+        }
+
         const tx = await signer.sendTransaction({ to, data, value });
         const receipt = await tx.wait();
 
