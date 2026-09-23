@@ -585,12 +585,13 @@ async function runFundGas(ctx, amountStr, chainKey = 'rh', selectedWallets = nul
       if (parsed.type === 'usd') {
         if (isArc) {
           // Arc native gas token is USDC ≈ $1
-          amountEth = parsed.usd;
+          amountEth = Number(parsed.usd.toFixed(6));
           usdNote = ` (≈ $${parsed.usd} USDC)`;
         } else {
           const ethPrice = await getEthPriceUsd();
-          amountEth = parsed.usd / ethPrice;
-          usdNote = ` ($${parsed.usd} ≈ ${amountEth.toFixed(6)} ETH @ $${ethPrice.toFixed(2)})`;
+          // Round to 8 decimals so ethers.parseEther never underflows
+          amountEth = Number((parsed.usd / ethPrice).toFixed(8));
+          usdNote = ` ($${parsed.usd} ≈ ${amountEth} ETH @ $${ethPrice.toFixed(2)})`;
         }
       } else {
         amountEth = parsed.amount;
@@ -618,7 +619,8 @@ async function runFundGas(ctx, amountStr, chainKey = 'rh', selectedWallets = nul
       );
     }
 
-    const amountWei = ethers.parseEther(String(amountEth));
+    // normalize string for ethers (max 18 decimals, we use ≤ 8)
+    const amountWei = ethers.parseEther(Number(amountEth).toFixed(8));
       const totalNeeded = amountWei * BigInt(targets.length);
     const provider = pool.current();
     const funder = sponsorWallet.signer.connect(provider);
@@ -848,60 +850,69 @@ async function runAcceptOffers(ctx, payload) {
           }
         }
 
-        // Dig out a sendable EVM transaction from several possible OpenSea shapes
-        const candidates = [
-          fulfill?.fulfillment_data?.transaction,
-          fulfill?.fulfillment_data?.orders?.[0]?.transaction,
-          fulfill?.transaction,
-          fulfill?.actions?.find?.((a) => a?.transaction)?.transaction,
-          fulfill?.actions?.[0]?.transaction,
-          fulfill,
-        ].filter(Boolean);
-
-        let to = null;
-        let data = null;
-        let value = 0n;
-
-        for (const c of candidates) {
-          const maybeTo = c.to || c.target || c.contract_address || null;
-          const maybeData =
-            c.data ||
-            c.input_data ||
-            c.calldata ||
-            c.input ||
-            null;
-          const maybeValue = c.value ?? c.wei_value ?? '0';
-
-          if (maybeTo && typeof maybeData === 'string' && maybeData.startsWith('0x')) {
-            to = maybeTo;
-            data = maybeData;
-            try {
-              value = BigInt(maybeValue || '0');
-            } catch {
-              value = 0n;
+        function findHexData(node, depth = 0) {
+          if (depth > 8 || node == null) return null;
+          if (typeof node === 'string' && /^0x[0-9a-fA-F]{10,}$/.test(node)) {
+            // prefer long calldata over addresses
+            if (node.length >= 20) return node;
+          }
+          if (Array.isArray(node)) {
+            for (const x of node) {
+              const f = findHexData(x, depth + 1);
+              if (f && f.length > 42) return f;
             }
-            break;
+            return null;
           }
+          if (typeof node === 'object') {
+            // common keys first
+            for (const k of ['data', 'calldata', 'input', 'input_data', 'callData']) {
+              if (typeof node[k] === 'string' && node[k].startsWith('0x') && node[k].length > 42) {
+                return node[k];
+              }
+            }
+            for (const v of Object.values(node)) {
+              const f = findHexData(v, depth + 1);
+              if (f && f.length > 42) return f;
+            }
+          }
+          return null;
         }
 
-        // Some responses put calldata under seaport function call fields
-        if (!data) {
-          const fd = fulfill?.fulfillment_data || fulfill;
-          const raw =
-            fd?.transaction?.data ||
-            fd?.calldata ||
-            fd?.input_data ||
+        function findTo(node) {
+          const t =
+            node?.fulfillment_data?.transaction?.to ||
+            node?.transaction?.to ||
+            node?.to ||
+            node?.fulfillment_data?.transaction?.target ||
             null;
-          if (typeof raw === 'string' && raw.startsWith('0x')) {
-            data = raw;
-            to = to || fd?.transaction?.to || m.protocolAddress;
+          if (typeof t === 'string' && t.startsWith('0x')) return t;
+          return m.protocolAddress;
+        }
+
+        function findValue(node) {
+          const v =
+            node?.fulfillment_data?.transaction?.value ??
+            node?.transaction?.value ??
+            node?.value ??
+            '0';
+          try {
+            return BigInt(v || '0');
+          } catch {
+            return 0n;
           }
         }
 
-        if (!to || !data || typeof data !== 'string' || !data.startsWith('0x')) {
-          const preview = JSON.stringify(fulfill).slice(0, 180);
+        let to = findTo(fulfill);
+        let data = findHexData(fulfill);
+        let value = findValue(fulfill);
+
+        // If OpenSea only returned a function signature + structured input,
+        // we cannot safely send without hex calldata.
+        if (!data) {
+          const preview = JSON.stringify(fulfill).slice(0, 220);
           results.push(
-            `❌ ${m.wallet.address.slice(0, 10)}... #${m.tokenId} bad fulfillment data: ${preview}`
+            `❌ ${m.wallet.address.slice(0, 10)}... #${m.tokenId} no hex calldata in fulfillment. ` +
+            `OpenSea returned structured Seaport data only. Preview: ${preview}`
           );
           continue;
         }
